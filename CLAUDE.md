@@ -3,6 +3,25 @@
 Personal control/diagnostics/tuning stack for an SO-101 follower arm on LeRobot 0.4.5.
 Repo: `github.com/amiryanj/robot_bazoo`. See [README.md](README.md) for the short tour.
 
+## Working principles
+
+How to approach any change here — from
+[andrej-karpathy-skills](https://github.com/multica-ai/andrej-karpathy-skills):
+
+1. **Think before coding** — don't assume, don't hide confusion, surface tradeoffs.
+   State assumptions explicitly; present alternatives instead of silently picking one;
+   mention the simpler approach and push back when warranted; stop and name confusion
+   rather than ploughing ahead.
+2. **Simplicity first** — minimum code that solves the problem, nothing speculative.
+   No unrequested features, abstractions, flexibility, or error handling for impossible
+   cases. Test: *"would a senior engineer call this overcomplicated?"* If yes, simplify.
+3. **Surgical changes** — touch only what you must; clean up only your own mess. Don't
+   refactor, reformat, or improve adjacent working code; don't delete pre-existing dead
+   code; match existing style. Every changed line should trace to the request.
+4. **Goal-driven execution** — define success criteria, loop until verified. Turn tasks
+   into measurable checks; for multi-step work, state a brief plan with a verification
+   step for each. (Here, "verified" often means: ran it in `--sim`, metrics improved.)
+
 ## Conventions (read first)
 
 These are the rules that keep a fresh session from breaking things:
