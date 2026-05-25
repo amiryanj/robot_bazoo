@@ -186,7 +186,7 @@ def cmd_step(robot, args):
     print(f"  Step: {start:.1f} -> {target:.1f} deg  (record {args.record}s)")
 
     data = st.capture_step(bus, motor, start, target,
-                           record_s=args.record, pre_settle_s=args.settle)
+                           record_s=args.record, pre_settle_s=args.settle, max_rate_hz=args.rate)
     print(f"  Sample rate achieved: {data['fs_hz']:.0f} Hz ({len(data['t'])} samples)")
     metrics = st.step_metrics(data["t"], data["goal"], data["pos"])
     fit = st.fit_second_order(data["t"], data["pos"], target)
@@ -209,7 +209,7 @@ def cmd_chirp(robot, args):
     amp = min(args.amp, (hi - lo) / 2 - 1)
     print(f"  Chirp: center={center:.1f}° amp={amp:.1f}° sweep {args.f0}->{args.f1} Hz over {args.duration}s")
 
-    data = st.capture_chirp(bus, motor, center, amp, args.f0, args.f1, args.duration)
+    data = st.capture_chirp(bus, motor, center, amp, args.f0, args.f1, args.duration, max_rate_hz=args.rate)
     print(f"  Sample rate achieved: {data['fs_hz']:.0f} Hz ({len(data['t'])} samples)")
     if data["fs_hz"] < 2 * args.f1:
         print(f"  ⚠ Sample rate < 2×f1 ({2*args.f1:.0f} Hz Nyquist) — raise f1 down or trust only low freqs.")
@@ -238,7 +238,8 @@ def cmd_profile(robot, args):
     for accel, label in [(0, "profiler OFF (accel=0)"), (test_accel, f"profiler ON (accel={test_accel})")]:
         st.set_acceleration(bus, motor, accel)
         time.sleep(0.2)
-        data = st.capture_step(bus, motor, start, target, record_s=args.record, pre_settle_s=args.settle)
+        data = st.capture_step(bus, motor, start, target, record_s=args.record,
+                               pre_settle_s=args.settle, max_rate_hz=args.rate)
         m = st.step_metrics(data["t"], data["goal"], data["pos"])
         print(f"  {label}: overshoot {m['overshoot_pct']:.1f}%  settling {m['settling_time_s']*1000:.0f} ms")
         runs.append((label, data))
@@ -271,7 +272,7 @@ def cmd_autotune(robot, args):
         try:
             st.set_pid(bus, motor, P=P, I=I, D=D, torque_off=args.torque_off)
             data = st.capture_step(bus, motor, start, target,
-                                   record_s=args.record, pre_settle_s=args.settle)
+                                   record_s=args.record, pre_settle_s=args.settle, max_rate_hz=args.rate)
             m = st.step_metrics(data["t"], data["goal"], data["pos"])
             return st.step_cost(m), m, data
         except Exception as e:
@@ -332,6 +333,8 @@ def build_parser():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--port", default=PORT)
     p.add_argument("--id", default=ROBOT_ID, dest="robot_id")
+    p.add_argument("--sim", action="store_true",
+                   help="run against the MuJoCo digital twin instead of hardware (smoke test)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def common(sp):
@@ -344,6 +347,8 @@ def build_parser():
                         help="disable torque while writing EEPROM (arm goes limp; use if PID writes fail to verify)")
         sp.add_argument("--record", type=float, default=1.5, help="record duration (s)")
         sp.add_argument("--settle", type=float, default=1.0, help="pre-step settle time (s)")
+        sp.add_argument("--rate", type=float, default=None,
+                        help="cap sample rate (Hz); default uncapped on hardware, 250 in --sim")
 
     sp = sub.add_parser("step", help="step response + metrics"); common(sp)
     sp.add_argument("--size", type=float, default=20.0, help="step magnitude from current pos (deg)")
@@ -381,7 +386,15 @@ HANDLERS = {"step": cmd_step, "chirp": cmd_chirp, "profile": cmd_profile, "autot
 
 def main():
     args = build_parser().parse_args()
-    robot = connect(args.port, args.robot_id)
+    if args.sim:
+        from sim_backend import SimRobot
+        print("Running against MuJoCo digital twin (--sim).")
+        if getattr(args, "rate", None) is None:
+            args.rate = 250.0          # mimic a realistic serial sample rate
+        robot = SimRobot()
+        robot.connect()
+    else:
+        robot = connect(args.port, args.robot_id)
     try:
         hold_all(robot)
         HANDLERS[args.cmd](robot, args)
