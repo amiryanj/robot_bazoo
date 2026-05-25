@@ -1,0 +1,25 @@
+# External dependencies (their own git repos / large clones) — not part of this project
+lerobot/
+SO-ARM100/
+
+# Generated data & logs
+outputs/
+datasets/
+wandb/
+*.mp4
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Secrets / local config
+.env
+*.key
+
+# OS / editor cruft
+.DS_Store
+*.swp
