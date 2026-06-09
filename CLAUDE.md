@@ -24,6 +24,19 @@ gives a policy that can't recover from mistakes (covariate shift).
 (5) train **ACT first** (tiny, trains locally for fast iteration), then **SmolVLA** (~450M,
 laptop-class, adds language). Big VLAs (OpenVLA-7B, Pi0) likely need cloud training.
 
+**Inference vs training:** we *can* run bigger VLAs locally for **inference** — OpenVLA-7B
+in 4-bit (~6–7 GB) and Pi0-class fit the 8 GB GPU. The limit is **speed, not memory**:
+a 7B runs ~1–5 Hz closed-loop on this laptop (fine for slow pick-place, bad for reactive
+control). ACT/SmolVLA run real-time. So big models are a comparison point; small-and-fast
+is the practical target for the bot.
+
+**Perception (decided):** ball detection uses a **deep detector (YOLO)**, not classical
+CV. Tried color+depth first (`vision/ball.py`) — the **RANSAC table-plane fit works well**
+and stays as a reusable primitive, but **color-only ball detection is brittle**: the wooden
+table reads orange in HSV and swamps the mask. A 3D-extent filter helps, but a small
+trained/zero-shot YOLO is the robust path. Plan: YOLO 2-D box → back-project box centre
+through depth → 3-D ball point; keep `fit_table_plane` for the workspace reference.
+
 **Hardware gotchas for this goal:** GPU is an **RTX 3000 Ada Laptop (~8 GB VRAM)** — fits
 ACT/SmolVLA, not big-VLA training. The **two-camera USB stall** is now on the critical path
 (VLAs want the wrist cam during grasp); solve it (powered hub / separate controller) or
@@ -136,6 +149,17 @@ SmolVLA training+inference; big-VLA (7B) training needs the cloud.
 **Sim & data:**
 - `sim_collect.py` — gamepad teleop inside MuJoCo, records episodes as a LeRobot
   dataset (for ACT training without the real arm). Scene: `scene_sim.xml` (ball + cams).
+
+**Vision (perception, WIP):**
+- `vision/capture_frame.py` — grab one aligned color+depth+intrinsics frame from the
+  top-down Realsense → `outputs/vision/<ts>/`. For offline detector dev (no arm).
+- `vision/ball.py` — `fit_table_plane` (RANSAC, **works**) + `localize_ball` (color+depth,
+  **brittle** — wood reads orange). Plane fit stays; ball detection moving to YOLO.
+
+**Analysis:**
+- `analyze_run.py` — offline analysis of a `station.py` run: gravity-removed wrist
+  vibration (spectrum + correlation with joint motion) and IMU-frame localization via
+  MuJoCo FK + Kabsch. `python analyze_run.py <run_dir>`.
 
 **Controller tuning (Feetech STS3215):**
 - `servo_tuning.py` — library: Lock-aware PID read/write (keeps torque on),

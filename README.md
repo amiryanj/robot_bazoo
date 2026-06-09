@@ -52,7 +52,9 @@ Detailed hardware notes, register quirks, and status live in [CLAUDE.md](CLAUDE.
 Live worklist; longer status/history lives in [CLAUDE.md](CLAUDE.md).
 
 **Primary: end-to-end VLA** (main direction — see CLAUDE.md)
-- [ ] Ball detection from top-down Realsense → 3D point (no arm needed; start here).
+- [x] Realsense capture tool (`vision/capture_frame.py`) + RANSAC table-plane fit.
+- [ ] **Ball detection via YOLO** (color+depth was brittle — wood reads orange);
+      2-D box → back-project through depth → 3-D point.
 - [ ] Hand-eye calibration (camera→base) — the one unavoidable prerequisite.
 - [ ] Scripted pick→rotate→place state machine (IK via `placo`), with randomization.
 - [ ] Auto-record LeRobot dataset in a loop → train **ACT**, then **SmolVLA**.
