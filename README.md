@@ -51,6 +51,13 @@ Detailed hardware notes, register quirks, and status live in [CLAUDE.md](CLAUDE.
 
 Live worklist; longer status/history lives in [CLAUDE.md](CLAUDE.md).
 
+**Primary: end-to-end VLA** (main direction — see CLAUDE.md)
+- [ ] Ball detection from top-down Realsense → 3D point (no arm needed; start here).
+- [ ] Hand-eye calibration (camera→base) — the one unavoidable prerequisite.
+- [ ] Scripted pick→rotate→place state machine (IK via `placo`), with randomization.
+- [ ] Auto-record LeRobot dataset in a loop → train **ACT**, then **SmolVLA**.
+- [ ] Fix two-camera USB stall (wrist cam for grasp) or collect top-down-only first.
+
 **Next (at the bench, arm at 7.5 V)**
 - [ ] Commanded **chirp on elbow_flex** (`calibrate.py` + `station.py` logging) → confirm
       the **~9.6 Hz** structural mode found in teleop (hand-wiggle, not clean yet).
