@@ -3,6 +3,32 @@
 Personal control/diagnostics/tuning stack for an SO-101 follower arm on LeRobot 0.4.5.
 Repo: `github.com/amiryanj/robot_bazoo`. See [README.md](README.md) for the short tour.
 
+## Primary goal — end-to-end VLA (don't get distracted)
+
+The **main direction** is an autonomous, end-to-end AI bot: run a vision-language-action
+policy on this laptop and fine-tune it on task data. Everything else (servo tuning, IMU
+resonance, etc.) is secondary — useful but **off the critical path**; don't rabbit-hole.
+
+**Reference task:** detect a mini-basketball (sphere) with the top-down Realsense, pick it,
+rotate a bit, place it, repeat.
+
+**Data strategy:** no leader arm and joystick teleop is too clumsy for pick-and-place, so
+**collect demos with a scripted/deterministic policy** (perception → IK "moveTo" → grasp
+state machine), then fine-tune the VLA on those episodes. Build in **randomization**
+(ball position, start pose, trajectory noise) from the start — clean scripted data alone
+gives a policy that can't recover from mistakes (covariate shift).
+
+**Critical path:** (1) ball detection + 3D point from depth → (2) **hand-eye calibration**
+(camera→base — the one unavoidable prerequisite) → (3) scripted pick-place state machine
+(IK via `placo`, already installed) → (4) auto-record LeRobot dataset in a loop →
+(5) train **ACT first** (tiny, trains locally for fast iteration), then **SmolVLA** (~450M,
+laptop-class, adds language). Big VLAs (OpenVLA-7B, Pi0) likely need cloud training.
+
+**Hardware gotchas for this goal:** GPU is an **RTX 3000 Ada Laptop (~8 GB VRAM)** — fits
+ACT/SmolVLA, not big-VLA training. The **two-camera USB stall** is now on the critical path
+(VLAs want the wrist cam during grasp); solve it (powered hub / separate controller) or
+collect top-down-only first.
+
 ## Working principles
 
 How to approach any change here — from
@@ -71,13 +97,17 @@ scale `0.038246` m/s²/LSB. Firmware + readers in `ESP32/` (see `ESP32/CLAUDE.md
 **Power** — 7.4–7.5 V / 5A+ (SPS-3010 bench supply). Connected and working; arm holds
 and lifts at 7.4 V.
 
-**Cameras** — Realsense D455 serial `117222251972` (`intelrealsense`); wrist webcam
-index `15` (`opencv`, 640×480 @ **25** fps — 30 raises RuntimeError). Known issue: both
-on the same USB hub stall (bandwidth); each works alone. Scripts connect cameras
-fault-tolerantly and accept `--no-realsense` / `--no-wrist`.
+**Cameras** — Realsense D455 serial `117222251972` (`intelrealsense`), **mounted top-down
+looking at the workspace** (the scene cam for ball detection; depth gives metric 3D);
+wrist webcam index `15` (`opencv`, 640×480 @ **25** fps — 30 raises RuntimeError). Known
+issue: both on the same USB hub stall (bandwidth); each works alone. Scripts connect
+cameras fault-tolerantly and accept `--no-realsense` / `--no-wrist`.
 
 **Gamepad** — Nintendo Switch Pro Controller (pygame name `"Pro Controller"`). Profiles
 auto-detected in `gamepad_utils.py`.
+
+**Compute** — laptop with an **NVIDIA RTX 3000 Ada Laptop GPU (~8 GB VRAM)**. Fits ACT /
+SmolVLA training+inference; big-VLA (7B) training needs the cloud.
 
 ## Scripts
 
