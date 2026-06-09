@@ -46,3 +46,31 @@ Each `station.py` run writes `outputs/logs/<timestamp>/` with `station.csv` (mot
 merge directly for motor↔IMU analysis.
 
 Detailed hardware notes, register quirks, and status live in [CLAUDE.md](CLAUDE.md).
+
+## TODO
+
+Live worklist; longer status/history lives in [CLAUDE.md](CLAUDE.md).
+
+**Next (at the bench, arm at 7.5 V)**
+- [ ] Commanded **chirp on elbow_flex** (`calibrate.py` + `station.py` logging) → confirm
+      the **~9.6 Hz** structural mode found in teleop (hand-wiggle, not clean yet).
+- [ ] **Wrist pose-sweep** (wave wrist_roll + wrist_flex through full range, rest still) →
+      pin the IMU mounting rotation below ~1° (currently 2.9°, see `analyze_run.py`).
+- [ ] **Tune D per joint** against the mode — start big: shoulder_pan, shoulder_lift,
+      elbow_flex; wrist/gripper are easy.
+
+**Calibration infra**
+- [ ] Integrate IMU into `calibrate.py autotune` — add a wrist-vibration cost term
+      (per-trial IMU thread + 9.6 Hz energy). Scaffold ready to write; **verify on hardware**.
+- [ ] Use IMU→link rotation to subtract gravity + rigid-body accel → pure joint oscillation.
+
+**Fixes / cleanup**
+- [ ] `graceful_shutdown` Ctrl-C move was abrupt/noisy — slower easing / tune REST_POSE.
+- [ ] Handle the ±100% `load_pct` single-sample spikes (direction-reversal glitch) when
+      parsing motor loads for calibration.
+- [ ] Realsense + wrist cam USB bandwidth (works alone, stalls together).
+
+**Findings (2026-06-10, run 00-48-25)**
+- Wrist vibration ~9.6 Hz (mode) + 19.3 Hz (harmonic); RMS 0.5 m/s², peak 8.
+- Vibration tracks joint **speed** (r=0.60), not current — mostly **elbow** (0.59), then pan/lift.
+- IMU mounting solved: IMU +X≈link+Z, +Y≈link+X, +Z≈link+Y (residual 2.9°).
