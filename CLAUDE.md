@@ -54,11 +54,19 @@ These are the rules that keep a fresh session from breaking things:
 
 ## Hardware
 
-**SO-101 arm** — `/dev/ttyACM0` (CH343 USB-serial), Feetech STS3215 (model 777),
-baud 1,000,000. Motors / IDs: 1 `shoulder_pan`, 2 `shoulder_lift`, 3 `elbow_flex`,
-4 `wrist_flex`, 5 `wrist_roll`, 6 `gripper`. Calibration:
+**SO-101 arm** — `/dev/ttyACM1` (CH343 USB-serial, vendor id `1a86`), Feetech STS3215
+(model 777), baud 1,000,000. Motors / IDs: 1 `shoulder_pan`, 2 `shoulder_lift`,
+3 `elbow_flex`, 4 `wrist_flex`, 5 `wrist_roll`, 6 `gripper`. Calibration:
 `~/.cache/huggingface/lerobot/calibration/robots/so_follower/so101.json` (id `so101`).
 Positions are in **degrees** (`use_degrees=True`), gripper in 0–100.
+Note: the arm moved to `ttyACM1` once the ESP32-C3 IMU claimed `ttyACM0` — `station.py`
+defaults the arm to `ttyACM1` (override with `--port`); the IMU reader finds the C3 by
+USB vendor id `303a`, so enumeration order doesn't matter.
+
+**Wrist IMU** — ADXL345 accelerometer on an ESP32-C3 Super Mini, mounted on `wrist_roll`.
+`/dev/ttyACM0` (native USB, vendor id `303a`), 800 Hz, binary stream at 460800 baud,
+scale `0.038246` m/s²/LSB. Firmware + readers in `ESP32/` (see `ESP32/CLAUDE.md`).
+`station.py` reads it in a background thread; `imu_serial.py` is the shared parser.
 
 **Power** — 7.4–7.5 V / 5A+ (SPS-3010 bench supply). Connected and working; arm holds
 and lifts at 7.4 V.
@@ -74,15 +82,26 @@ auto-detected in `gamepad_utils.py`.
 ## Scripts
 
 **Control & diagnostics (real arm):**
-- `teleop_gamepad.py` — gamepad joint-velocity teleop + pygame panel + Rerun.
-  `--twin` adds the MuJoCo 3-D viewer (off by default). Mapping: L-stick = pan/lift,
-  R-stick = elbow/wrist-roll, L/R = wrist-flex, ZL/ZR = gripper.
-- `command_log.py` — drive joints by gamepad **or** typed commands while logging
-  load/current per motor (pygame bars + Rerun + CSV). For studying torque draw.
-- `diagnose_motors.py` — startup register health report + live sensor stream to
-  Rerun + CSV. Flags: `--torque N`, `--fix-pgain`, `--clear-overload`.
+- `station.py` — **the single entry point** (replaced `teleop_gamepad.py`,
+  `command_log.py`, `diagnose_motors.py`). Connects the arm, auto-opens **one** Rerun
+  window (`spawn=True`) with a default blueprint, and streams everything onto one
+  `time` timeline: motors (pos/load/current/voltage/status), the gamepad (sticks as
+  2-D points + button strips), the wrist IMU (background thread, see ESP32), and
+  optionally cameras + a MuJoCo twin. Gamepad mapping unchanged: L-stick = pan/lift,
+  R-stick = elbow/wrist-roll, L/R = wrist-flex, ZL/ZR = gripper. Also takes typed
+  commands (`<joint> <deg>`, `all <deg>`, `hold`, `torque off/on`, `q`).
+  - Joystick is **hot-pluggable** — start with none, plug in mid-run, unplug and the
+    arm holds (pygame runs headless via `SDL_VIDEODRIVER=dummy`, input only).
+  - Flags: `--observe` (read-only, no teleop), `--health` (startup register report),
+    `--torque N` / `--fix-pgain` / `--clear-overload` (EEPROM fixes), `--cameras`,
+    `--twin`, `--no-imu`, `--no-log`, `--port`, `--rate`.
+  - Logs to `outputs/logs/<timestamp>/`: `station.csv` (motors @ `--rate`),
+    `imu.csv` (IMU @ 800 Hz), `summary.txt` (header + `t0_unix_epoch` + health report).
+    Both CSVs share one `time_s` origin (`t0`) so motor↔IMU rows merge directly. The
+    IMU goes to Rerun + `imu.csv`, **not** into `station.csv`.
 - `gamepad_utils.py` — shared constants, controller profiles, `DeltaSmoother`,
-  `graceful_shutdown`, `REST_POSE`, pygame draw helpers. Imported by the above.
+  `graceful_shutdown`, `REST_POSE`, pygame draw helpers. Imported by `station.py`
+  and `sim_collect.py`.
 
 **Sim & data:**
 - `sim_collect.py` — gamepad teleop inside MuJoCo, records episodes as a LeRobot
@@ -115,8 +134,10 @@ python calibrate.py autotune --joint shoulder_pan --size 25 --trials 40
 python calibrate.py chirp    --joint shoulder_pan --f0 0.5 --f1 15
 ```
 Outputs (CSV + PNG) land in `outputs/tuning/<timestamp>_*/`. Restore factory gains with
-`--p 32 --i 0 --d 32`. Future: a wrist accelerometer (IMU) for true resonance ID /
-input shaping — encoder-only feedback caps the chirp at ~20–30 Hz.
+`--p 32 --i 0 --d 32`. The wrist IMU (now mounted) gives true resonance ID / input
+shaping beyond the encoder-only chirp ceiling (~20–30 Hz); capture motor+IMU together
+with `station.py` and merge the two CSVs on `time_s`. `calibrate.py` does not yet read
+the IMU.
 
 ## Local lerobot patches
 
@@ -132,10 +153,15 @@ Reapply after a fresh lerobot clone: `git -C lerobot apply ../patches/lerobot_lo
 - [x] Gamepad teleop, MuJoCo twin, Rerun diagnostics, current logging
 - [x] Tuning toolkit built; analysis validated on synthetic data; full loop smoke-tested in `--sim`
 - [x] Project under git, pushed to GitHub
+- [x] Wrist IMU (ADXL345 on ESP32-C3) mounted on `wrist_roll`, streaming at 800 Hz
+- [x] Unified cockpit `station.py` — motors + IMU + gamepad in one Rerun window,
+      synced CSV logging (`station.csv` + `imu.csv` on a shared clock)
 - [ ] **Run tuning on the real arm** (not done yet — start shoulder_pan at 7.5 V)
+- [ ] Use synced IMU + motor logs to calibrate servo coefficients / ID resonance
+- [ ] Revisit `graceful_shutdown` — Ctrl-C rest-pose move was abrupt/noisy (tune
+      `REST_POSE` / duration, maybe slower easing)
 - [ ] Realsense + wrist cam USB bandwidth (works alone, stalls together)
 - [ ] Collect sim episodes → cloud ACT training (plan exists)
-- [ ] Buy + mount wrist IMU for resonance/input-shaping
 
 ## Robot config (cameras)
 
@@ -145,7 +171,7 @@ from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraCon
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
 
 config = SOFollowerRobotConfig(
-    port="/dev/ttyACM0", id="so101",
+    port="/dev/ttyACM1", id="so101",   # ttyACM0 is the ESP32-C3 IMU
     cameras={
         "realsense": RealSenseCameraConfig(serial_number_or_name="117222251972", fps=30, width=640, height=480),
         "wrist":     OpenCVCameraConfig(index_or_path=15, fps=25, width=640, height=480),
