@@ -53,9 +53,17 @@ Live worklist; longer status/history lives in [CLAUDE.md](CLAUDE.md).
 
 **Primary: end-to-end VLA** (main direction — see CLAUDE.md)
 - [x] Realsense capture tool (`vision/capture_frame.py`) + RANSAC table-plane fit.
-- [ ] **Ball detection via YOLO** (color+depth was brittle — wood reads orange);
-      2-D box → back-project through depth → 3-D point.
+- [x] **Ball detection via YOLO** (`vision/ball_yolo.py`): pretrained basketball
+      `best.pt` (`vision/models/basketball.pt`) → 2-D box → back-project box centre
+      through depth → 3-D point (cam frame); keeps `fit_table_plane`. Clean single
+      box @0.36 conf where color was brittle (wood reads orange). Zero-shot COCO
+      (`orange`@0.09) and YOLO-World (@0.18) were too weak. Fine-tune on our scene
+      later if conf wobbles at table edges / under occlusion (model = ready auto-labeler).
 - [ ] Hand-eye calibration (camera→base) — the one unavoidable prerequisite.
+      No tip detector (bare-tip detection is unreliable) — use a **marker with a known
+      tip offset**. Plan: reuse the **ball as marker** (`ball_yolo.py` gives cam-frame
+      3-D, FK gives base frame) over ~8–10 poses → **Kabsch** (already in `analyze_run.py`);
+      ArUco-on-gripper (`cv2.aruco`, available) is the rock-solid fallback.
 - [ ] Scripted pick→rotate→place state machine (IK via `placo`), with randomization.
 - [ ] Auto-record LeRobot dataset in a loop → train **ACT**, then **SmolVLA**.
 - [ ] Fix two-camera USB stall (wrist cam for grasp) or collect top-down-only first.

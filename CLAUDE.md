@@ -18,8 +18,10 @@ state machine), then fine-tune the VLA on those episodes. Build in **randomizati
 (ball position, start pose, trajectory noise) from the start — clean scripted data alone
 gives a policy that can't recover from mistakes (covariate shift).
 
-**Critical path:** (1) ball detection + 3D point from depth → (2) **hand-eye calibration**
-(camera→base — the one unavoidable prerequisite) → (3) scripted pick-place state machine
+**Critical path:** (1) ball detection + 3D point from depth (**done** — `vision/ball_yolo.py`)
+→ (2) **hand-eye calibration** (camera→base — the one unavoidable prerequisite; no tip
+detector, use a marker with a known tip offset — plan: **ball-as-marker + Kabsch**, ArUco
+fallback) → (3) scripted pick-place state machine
 (IK via `placo`, already installed) → (4) auto-record LeRobot dataset in a loop →
 (5) train **ACT first** (tiny, trains locally for fast iteration), then **SmolVLA** (~450M,
 laptop-class, adds language). Big VLAs (OpenVLA-7B, Pi0) likely need cloud training.
@@ -30,12 +32,18 @@ a 7B runs ~1–5 Hz closed-loop on this laptop (fine for slow pick-place, bad fo
 control). ACT/SmolVLA run real-time. So big models are a comparison point; small-and-fast
 is the practical target for the bot.
 
-**Perception (decided):** ball detection uses a **deep detector (YOLO)**, not classical
+**Perception (done):** ball detection uses a **deep detector (YOLO)**, not classical
 CV. Tried color+depth first (`vision/ball.py`) — the **RANSAC table-plane fit works well**
 and stays as a reusable primitive, but **color-only ball detection is brittle**: the wooden
-table reads orange in HSV and swamps the mask. A 3D-extent filter helps, but a small
-trained/zero-shot YOLO is the robust path. Plan: YOLO 2-D box → back-project box centre
-through depth → 3-D ball point; keep `fit_table_plane` for the workspace reference.
+table reads orange in HSV and swamps the mask. Implemented in `vision/ball_yolo.py`: a
+**pretrained basketball YOLO** (`vision/models/basketball.pt`, ~6 MB, from
+[avishah3/AI-Basketball-Shot-Detection-Tracker], classes `Basketball`/`Hoop`) → 2-D box →
+back-project box centre through depth → 3-D ball point (cam frame); `fit_table_plane` pushes
+the surface point in by one radius to the centre. Despite the broadcast→tabletop domain gap
+it gives a **clean single box @0.36** (a basketball is a sphere — same from any angle), vs
+zero-shot COCO `orange`@0.09 and YOLO-World @0.18, which were unusable. **Next-step plan if
+conf wobbles** (table edges, arm occlusion): fine-tune `yolov8n` on our own top-down scene,
+using this model as a free auto-labeler (+ a Roboflow ball dataset to augment).
 
 **Hardware gotchas for this goal:** GPU is an **RTX 3000 Ada Laptop (~8 GB VRAM)** — fits
 ACT/SmolVLA, not big-VLA training. The **two-camera USB stall** is now on the critical path
@@ -153,8 +161,12 @@ SmolVLA training+inference; big-VLA (7B) training needs the cloud.
 **Vision (perception, WIP):**
 - `vision/capture_frame.py` — grab one aligned color+depth+intrinsics frame from the
   top-down Realsense → `outputs/vision/<ts>/`. For offline detector dev (no arm).
-- `vision/ball.py` — `fit_table_plane` (RANSAC, **works**) + `localize_ball` (color+depth,
-  **brittle** — wood reads orange). Plane fit stays; ball detection moving to YOLO.
+- `vision/ball.py` — `fit_table_plane` (RANSAC, **works**, reused) + `localize_ball`
+  (color+depth, **brittle** — wood reads orange; superseded by the YOLO localizer).
+- `vision/ball_yolo.py` — **the ball localizer.** Pretrained basketball YOLO
+  (`vision/models/basketball.pt`) → 2-D box → box centre back-projected through the
+  median in-box depth → 3-D ball point (cam frame); reuses `fit_table_plane`. Run
+  `python vision/ball_yolo.py [<capture_dir>]` to verify; writes `yolo_overlay.png`.
 
 **Analysis:**
 - `analyze_run.py` — offline analysis of a `station.py` run: gravity-removed wrist
@@ -210,6 +222,8 @@ Reapply after a fresh lerobot clone: `git -C lerobot apply ../patches/lerobot_lo
 - [x] Wrist IMU (ADXL345 on ESP32-C3) mounted on `wrist_roll`, streaming at 800 Hz
 - [x] Unified cockpit `station.py` — motors + IMU + gamepad in one Rerun window,
       synced CSV logging (`station.csv` + `imu.csv` on a shared clock)
+- [x] **YOLO ball detection → 3D point** (`vision/ball_yolo.py`, pretrained model);
+      next on the critical path: **hand-eye calibration** (ball-as-marker + Kabsch)
 - [ ] **Run tuning on the real arm** (not done yet — start shoulder_pan at 7.5 V)
 - [ ] Use synced IMU + motor logs to calibrate servo coefficients / ID resonance
 - [ ] Revisit `graceful_shutdown` — Ctrl-C rest-pose move was abrupt/noisy (tune
