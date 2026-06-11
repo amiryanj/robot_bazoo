@@ -59,11 +59,16 @@ Live worklist; longer status/history lives in [CLAUDE.md](CLAUDE.md).
       box @0.36 conf where color was brittle (wood reads orange). Zero-shot COCO
       (`orange`@0.09) and YOLO-World (@0.18) were too weak. Fine-tune on our scene
       later if conf wobbles at table edges / under occlusion (model = ready auto-labeler).
-- [ ] Hand-eye calibration (camera→base) — the one unavoidable prerequisite.
-      No tip detector (bare-tip detection is unreliable) — use a **marker with a known
-      tip offset**. Plan: reuse the **ball as marker** (`ball_yolo.py` gives cam-frame
-      3-D, FK gives base frame) over ~8–10 poses → **Kabsch** (already in `analyze_run.py`);
-      ArUco-on-gripper (`cv2.aruco`, available) is the rock-solid fallback.
+- [~] Hand-eye calibration (camera→base) — tool built (`vision/handeye_calib.py`),
+      pending the live run. Marker = the **teal heart sticker** on the wrist_roll part
+      (`gripper` body). Detected with **Grounding DINO** ("heart" zero-shot) + a tight
+      teal-color gate inside each box — learned shape beats color segmentation (which
+      grabbed the piano keys); teal is the only reliably-detectable heart (yellow/pink
+      wash out, orange=table, red=arm). Per pose: teal pixel + depth → 3-D (cam frame),
+      joint angles + MuJoCo FK of `gripper` → 3-D (base frame); a least-squares solver
+      jointly fits T_cam→base **and** the marker offset over ~10–15 poses. Self-test
+      passes (rot 0.09°, trans 1.6 mm); detection 6/8 on random poses, 0 false picks.
+      `vision/heart_detect_test.py` is the offline multi-frame detection check.
 - [ ] Scripted pick→rotate→place state machine (IK via `placo`), with randomization.
 - [ ] Auto-record LeRobot dataset in a loop → train **ACT**, then **SmolVLA**.
 - [ ] Fix two-camera USB stall (wrist cam for grasp) or collect top-down-only first.

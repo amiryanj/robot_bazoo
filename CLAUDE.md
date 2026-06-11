@@ -19,9 +19,9 @@ state machine), then fine-tune the VLA on those episodes. Build in **randomizati
 gives a policy that can't recover from mistakes (covariate shift).
 
 **Critical path:** (1) ball detection + 3D point from depth (**done** — `vision/ball_yolo.py`)
-→ (2) **hand-eye calibration** (camera→base — the one unavoidable prerequisite; no tip
-detector, use a marker with a known tip offset — plan: **ball-as-marker + Kabsch**, ArUco
-fallback) → (3) scripted pick-place state machine
+→ (2) **hand-eye calibration** (camera→base — the one unavoidable prerequisite; tool built,
+**`vision/handeye_calib.py`**, pending the live run — teal-heart marker + Grounding DINO +
+joint solver, see below) → (3) scripted pick-place state machine
 (IK via `placo`, already installed) → (4) auto-record LeRobot dataset in a loop →
 (5) train **ACT first** (tiny, trains locally for fast iteration), then **SmolVLA** (~450M,
 laptop-class, adds language). Big VLAs (OpenVLA-7B, Pi0) likely need cloud training.
@@ -97,7 +97,9 @@ These are the rules that keep a fresh session from breaking things:
 - Extra deps installed in-env: `control`, `optuna`, `scipy` (tuning); `mujoco==3.8.1`,
   `placo==0.9.23`; `feetech-servo-sdk==1.0.0` (imports as `scservo_sdk`);
   `pyrealsense2==2.56.5.9235`; `opencv-python-headless==4.12.0`;
-  `torchvision==0.20.1+cu124` (runtime-compatible with torch 2.5.1).
+  `torchvision==0.20.1+cu124` (runtime-compatible with torch 2.5.1);
+  `transformers==4.49.0` (Grounding DINO for `handeye_calib.py` — **pin it**: transformers
+  5.x pulls `huggingface-hub` 1.x which breaks lerobot's `<0.36.0` pin; keep hub at 0.35.x).
 
 ## Hardware
 
@@ -167,6 +169,21 @@ SmolVLA training+inference; big-VLA (7B) training needs the cloud.
   (`vision/models/basketball.pt`) → 2-D box → box centre back-projected through the
   median in-box depth → 3-D ball point (cam frame); reuses `fit_table_plane`. Run
   `python vision/ball_yolo.py [<capture_dir>]` to verify; writes `yolo_overlay.png`.
+- `vision/handeye_calib.py` — **hand-eye calibration** (eye-to-hand, T_cam→base).
+  Marker = the **teal heart** on the wrist_roll part (`gripper` body — rigid w.r.t. the
+  gripper opening). `HeartDetector` runs **Grounding DINO** (`grounding-dino-tiny`,
+  zero-shot "heart.") then keeps the box whose interior is mostly **teal** (HSV H 88–98,
+  S≥180 — the razor-clean band; yellow/pink hearts wash out, orange=table, red=arm).
+  Learned shape + in-box color beats whole-frame color segmentation (which grabbed the
+  piano keys). Per captured pose: teal pixel + aligned depth → 3-D (cam frame); joint
+  angles → MuJoCo FK of `gripper` → 3-D (base frame). `solve_handeye` (scipy
+  `least_squares`, 4 rotation seeds) jointly fits **T_cam→base + the marker offset**
+  (9 unknowns) over ~10–15 poses. Gamepad teleop + typed `c`/`u`/`q`; live Rerun preview
+  (`cam/hearts`, green dot = picked teal). `--selftest` verifies the solver offline (no
+  hardware). Output: `outputs/calib/handeye.json`.
+- `vision/heart_detect_test.py` — offline check: grab N Realsense frames (hand-move the
+  limp arm between grabs), run the heart detector on each, save annotated overlays. Used
+  to tune the teal gate (measured 6/8 recall, 0 false picks on the 2026-06-11 capture).
 
 **Analysis:**
 - `analyze_run.py` — offline analysis of a `station.py` run: gravity-removed wrist
@@ -222,8 +239,10 @@ Reapply after a fresh lerobot clone: `git -C lerobot apply ../patches/lerobot_lo
 - [x] Wrist IMU (ADXL345 on ESP32-C3) mounted on `wrist_roll`, streaming at 800 Hz
 - [x] Unified cockpit `station.py` — motors + IMU + gamepad in one Rerun window,
       synced CSV logging (`station.csv` + `imu.csv` on a shared clock)
-- [x] **YOLO ball detection → 3D point** (`vision/ball_yolo.py`, pretrained model);
-      next on the critical path: **hand-eye calibration** (ball-as-marker + Kabsch)
+- [x] **YOLO ball detection → 3D point** (`vision/ball_yolo.py`, pretrained model)
+- [~] **Hand-eye calibration tool built** (`vision/handeye_calib.py`): teal-heart marker
+      via Grounding DINO + in-box teal gate, MuJoCo FK of `gripper`, joint T_cam→base +
+      offset solver (self-test passes). **Pending:** the live capture run on hardware.
 - [ ] **Run tuning on the real arm** (not done yet — start shoulder_pan at 7.5 V)
 - [ ] Use synced IMU + motor logs to calibrate servo coefficients / ID resonance
 - [ ] Revisit `graceful_shutdown` — Ctrl-C rest-pose move was abrupt/noisy (tune
