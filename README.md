@@ -135,7 +135,13 @@ Live worklist; longer status/history lives in [CLAUDE.md](CLAUDE.md).
       Per pose: pink pixel + depth → 3-D (cam frame), joint angles + MuJoCo FK →
       3-D (base frame); least-squares jointly fits T_cam→base **and** the marker offset.
       How/why: [vision/HANDEYE.md](vision/HANDEYE.md).
-- [ ] Scripted pick→rotate→place state machine (IK via `placo`), with randomization.
+- [~] **Scripted pick (WIP)** — `pick_ball.py`: GDINO ball detection + handeye +
+      multi-seed MuJoCo IK + twin preview + staged grasp behind a confirm. First real
+      grasp still pending (z-from-depth fix is in, untested on hardware).
+- [~] **Fast scene detector** — GDINO-as-teacher auto-labeling (`vision/autolabel.py`)
+      → yolov8n student + benchmark (`vision/detector_bench.py`). v1 trained on 45
+      auto-labeled frames; see [vision/DETECTOR.md](vision/DETECTOR.md).
+- [ ] Scripted pick→rotate→place state machine, with randomization.
 - [ ] Auto-record LeRobot dataset in a loop → train **ACT**, then **SmolVLA**.
 - [ ] Fix two-camera USB stall (wrist cam for grasp) or collect top-down-only first.
 

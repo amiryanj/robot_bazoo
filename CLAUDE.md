@@ -284,6 +284,19 @@ so it survives a re-clone; edit it (not EEPROM) to change standing gains.
       per capture; diagnosed the after-stop oscillation (underdamped loop + gravity)
       and fixed it with **D=200** on pan/lift/elbow, persisted via `gains.json`
       (applied on every connect by the patched `configure()`). See Tuning workflow.
+- [~] **Scripted pick (WIP)** — `pick_ball.py`: GDINO "basketball." detection (the
+      vendored basketball.pt scores ~0 on the mini ball vs white plate), depth →
+      handeye → base frame (z from depth — ball may sit on a holder; the scene has
+      TWO planes: white ~1 cm plate on the wooden desk, RANSAC may fit either),
+      multi-seed MuJoCo IK (fingers-down is a soft preference, position dominates),
+      twin preview, staged grasp, graceful landing on every exit. **First real grasp
+      pending.** Geometry context 2026-06-11: cam ~50–70 cm top-down; base origin is
+      ~3 cm above the plate (plate ≈ −29 mm, desk ≈ −43 mm in base coords).
+- [~] **Fast scene detector (v1 trained overnight)** — GDINO teacher auto-labels
+      (`vision/autolabel.py`), yolov8n student, benchmark vs teacher
+      (`vision/detector_bench.py`). Dataset 45 frames / 204 augmented under
+      `outputs/vision/dataset_2026-06-11/`. See `vision/DETECTOR.md`. v1 is
+      single-scene — collect varied data with Javad before trusting it broadly.
 - [ ] Resonance ID / input shaping from chirp + IMU (encoder-only ceiling ~20–30 Hz)
 - [ ] Revisit `graceful_shutdown` — Ctrl-C rest-pose move was abrupt/noisy (tune
       `REST_POSE` / duration, maybe slower easing)
