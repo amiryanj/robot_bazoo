@@ -200,6 +200,16 @@ SmolVLA training+inference; big-VLA (7B) training needs the cloud.
 - `vision/heart_detect_test.py` — offline check: grab N Realsense frames (hand-move the
   limp arm between grabs), run the heart detector on each, save annotated overlays. Used
   to tune the color gates against real lighting before trusting them live.
+- `vision/scene_debug.py` — **the 3-D truth window**: MuJoCo viewer with the live arm
+  (torque disabled — hand-move it), the detected ball, the pink heart **measured**
+  (magenta) vs **FK-predicted** (green), and the fitted plane; prints the live
+  magenta-green gap in mm = end-to-end error of detection+depth+handeye+FK. Use this
+  first whenever localization looks wrong.
+- `vision/autolabel.py` / `vision/detector_bench.py` / `vision/collect_marker_data.py` —
+  the detector pipeline (see `vision/DETECTOR.md`): GDINO-teacher auto-labeling, the
+  student-vs-teacher benchmark, and a bounded autonomous arm session that captures the
+  finger hearts in varied in-air poses (FK-filtered clear-air box, graceful landing).
+  Student weights: `vision/models/scene_yolov8n.pt` (ball 7/7 vs teacher, 11 ms warm).
 
 **Analysis:**
 - `analyze_run.py` — offline analysis of a `station.py` run: gravity-removed wrist
@@ -297,6 +307,15 @@ so it survives a re-clone; edit it (not EEPROM) to change standing gains.
       (`vision/detector_bench.py`). Dataset 45 frames / 204 augmented under
       `outputs/vision/dataset_2026-06-11/`. See `vision/DETECTOR.md`. v1 is
       single-scene — collect varied data with Javad before trusting it broadly.
+      `pick_ball.py` now uses the student first (11 ms) with GDINO fallback.
+      **Hearts still data-starved** (19 instances): the overnight collection session
+      ran cleanly but the room lights were off → frames black → rerun
+      `vision/collect_marker_data.py` in daylight, autolabel (QC: heart label must
+      sit near the FK-projected gripper pixel), retrain.
+- [x] **Pick choreography validated in sim (2026-06-11 night)** — full sequence
+      (plan → above → descend → contact-close → lift → replace → land) ran against
+      `sim_backend.SimRobot`: plan 0.4 mm, sim TCP tracks within ~7 mm. Only physical
+      contact remains untested — first real grasp happens with Javad present.
 - [ ] Resonance ID / input shaping from chirp + IMU (encoder-only ceiling ~20–30 Hz)
 - [ ] Revisit `graceful_shutdown` — Ctrl-C rest-pose move was abrupt/noisy (tune
       `REST_POSE` / duration, maybe slower easing)

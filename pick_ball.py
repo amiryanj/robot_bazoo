@@ -159,30 +159,42 @@ def selftest():
 
 # ── Perception: ball in the base frame ───────────────────────────────────────────────
 
+YOLO_WEIGHTS = ROOT / "vision/models/scene_yolov8n.pt"
+
+
 class BallDetector:
-    """Grounding DINO, zero-shot prompt "basketball." — the basketball-specific YOLO
-    (vision/models/basketball.pt) failed on the mini ball against the white mat
-    (conf 0.00 vs GDINO 0.76 on the same frame). Same lesson as the heart marker:
-    the zero-shot detector generalizes to this scene, the specialist doesn't."""
+    """Fast student first, slow teacher as fallback.
+
+    Student: yolov8n fine-tuned on our scene (vision/DETECTOR.md) — ~5 ms/frame.
+    Fallback: Grounding DINO zero-shot "basketball." for frames the student has
+    never seen (it's single-scene v1). The broadcast basketball.pt YOLO stays out:
+    it scored ~0 on the mini ball against the white plate."""
 
     def __init__(self, device=None):
         import torch
-        from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
         self.torch = torch
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        mid = "IDEA-Research/grounding-dino-tiny"
-        self.proc = AutoProcessor.from_pretrained(mid)
-        self.model = AutoModelForZeroShotObjectDetection.from_pretrained(mid).to(self.device).eval()
+        self.student = None
+        if YOLO_WEIGHTS.exists():
+            from ultralytics import YOLO
+            self.student = YOLO(str(YOLO_WEIGHTS))
+        self._gdino = None                                # lazy: only if student fails
 
-    def detect(self, color_bgr, thr=0.3):
-        """Highest-conf ball box -> ((x1,y1,x2,y2), conf) or (None, 0)."""
+    def _gdino_detect(self, color_bgr, thr):
         import cv2
         from PIL import Image
+        if self._gdino is None:
+            from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+            mid = "IDEA-Research/grounding-dino-tiny"
+            self._gdino = (AutoProcessor.from_pretrained(mid),
+                           AutoModelForZeroShotObjectDetection.from_pretrained(mid)
+                           .to(self.device).eval())
+        proc, model = self._gdino
         img = Image.fromarray(cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB))
-        inp = self.proc(images=img, text="basketball.", return_tensors="pt").to(self.device)
+        inp = proc(images=img, text="basketball.", return_tensors="pt").to(self.device)
         with self.torch.no_grad():
-            out = self.model(**inp)
-        res = self.proc.post_process_grounded_object_detection(
+            out = model(**inp)
+        res = proc.post_process_grounded_object_detection(
             out, inp.input_ids, threshold=thr, text_threshold=thr,
             target_sizes=[img.size[::-1]])[0]
         best = None
@@ -190,6 +202,18 @@ class BallDetector:
             if best is None or score > best[1]:
                 best = ([int(v) for v in box], float(score))
         return best if best else (None, 0.0)
+
+    def detect(self, color_bgr, thr=0.3):
+        """Highest-conf ball box -> ((x1,y1,x2,y2), conf) or (None, 0)."""
+        if self.student is not None:
+            res = self.student(color_bgr, conf=0.45, verbose=False)[0]
+            best = None
+            for c, p, b in zip(res.boxes.cls, res.boxes.conf, res.boxes.xyxy):
+                if res.names[int(c)] == "ball" and (best is None or float(p) > best[1]):
+                    best = ([int(v) for v in b], float(p))
+            if best:
+                return best
+        return self._gdino_detect(color_bgr, thr)
 
 
 def localize_base(detector=None):
