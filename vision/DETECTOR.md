@@ -49,6 +49,13 @@ So: the standard distillation pattern. GDINO auto-labels our own frames; a `yolo
   only at poses where it faced the camera. It will overfit to this scene; that's fine
   for the pick-place loop on this table, not for generalization. Next data session:
   move the ball + arm between captures, vary the holder, capture during teleop.
+- **Tried and rejected (2026-06-11 night): copy-paste heart augmentation** — 68
+  synthetic hearts (rotated/scaled/brightness-jittered crops pasted onto train frames)
+  → zero gain on val heart recall (identical hits, slightly lower conf). The misses
+  are poses the camera genuinely barely sees, not a sample-count problem. Fix is real
+  varied-pose data: `vision/collect_marker_data.py` with the lights on. The val heart
+  reference also inherits teacher false-positives (red clamp) — human-check val labels
+  before reading the heart agreement number literally.
 
 ## 3D localization
 
