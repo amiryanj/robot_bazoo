@@ -19,9 +19,9 @@ state machine), then fine-tune the VLA on those episodes. Build in **randomizati
 gives a policy that can't recover from mistakes (covariate shift).
 
 **Critical path:** (1) ball detection + 3D point from depth (**done** — `vision/ball_yolo.py`)
-→ (2) **hand-eye calibration** (camera→base — the one unavoidable prerequisite; tool built,
-**`vision/handeye_calib.py`**, pending the live run — teal-heart marker + Grounding DINO +
-joint solver, see below) → (3) scripted pick-place state machine
+→ (2) **hand-eye calibration** (**done** — `vision/handeye_calib.py`, T_cam→base solved at
+**4.6 mm RMS** over 16 poses → `outputs/calib/handeye.json`; pink-heart marker + Grounding
+DINO, see below) → (3) scripted pick-place state machine
 (IK via `placo`, already installed) → (4) auto-record LeRobot dataset in a loop →
 (5) train **ACT first** (tiny, trains locally for fast iteration), then **SmolVLA** (~450M,
 laptop-class, adds language). Big VLAs (OpenVLA-7B, Pi0) likely need cloud training.
@@ -169,21 +169,24 @@ SmolVLA training+inference; big-VLA (7B) training needs the cloud.
   (`vision/models/basketball.pt`) → 2-D box → box centre back-projected through the
   median in-box depth → 3-D ball point (cam frame); reuses `fit_table_plane`. Run
   `python vision/ball_yolo.py [<capture_dir>]` to verify; writes `yolo_overlay.png`.
-- `vision/handeye_calib.py` — **hand-eye calibration** (eye-to-hand, T_cam→base).
-  Marker = the **teal heart** on the wrist_roll part (`gripper` body — rigid w.r.t. the
-  gripper opening). `HeartDetector` runs **Grounding DINO** (`grounding-dino-tiny`,
-  zero-shot "heart.") then keeps the box whose interior is mostly **teal** (HSV H 88–98,
-  S≥180 — the razor-clean band; yellow/pink hearts wash out, orange=table, red=arm).
-  Learned shape + in-box color beats whole-frame color segmentation (which grabbed the
-  piano keys). Per captured pose: teal pixel + aligned depth → 3-D (cam frame); joint
-  angles → MuJoCo FK of `gripper` → 3-D (base frame). `solve_handeye` (scipy
-  `least_squares`, 4 rotation seeds) jointly fits **T_cam→base + the marker offset**
-  (9 unknowns) over ~10–15 poses. Gamepad teleop + typed `c`/`u`/`q`; live Rerun preview
-  (`cam/hearts`, green dot = picked teal). `--selftest` verifies the solver offline (no
-  hardware). Output: `outputs/calib/handeye.json`.
+- `vision/handeye_calib.py` — **hand-eye calibration** (eye-to-hand, T_cam→base). **Ran
+  2026-06-11: 4.6 mm RMS over 16 poses → `outputs/calib/handeye.json`.** Marker = the
+  **pink heart** on a gripper finger (gripper opening must stay **fixed** during the run;
+  the solved offset absorbs the rest). `HeartDetector` runs **Grounding DINO**
+  (`grounding-dino-tiny`, zero-shot "heart.", threshold 0.12 — boxes the ball/tire too,
+  rejected by color) in a **background thread** (CPU inference would otherwise stall
+  teleop), then keeps the small box whose interior is mostly pink. **Pink wraps in HSV**:
+  H 160–166 in cool light but H≈0–2 in warm light, so gate both hue ends with **S capped
+  at 130** (pale sticker S 75–103 vs red arm plastic S 136–180 — saturation, not hue,
+  separates them). Learned shape + in-box color beats whole-frame color segmentation
+  (which grabbed the piano keys). Per captured pose: pink pixel + aligned depth → 3-D
+  (cam frame); joint angles → MuJoCo FK of `gripper` → 3-D (base frame). `solve_handeye`
+  (scipy `least_squares`, 4 rotation seeds) jointly fits **T_cam→base + the marker
+  offset** (9 unknowns). Gamepad teleop + typed `c`/`u`/`q`; live Rerun preview (green
+  dot = picked marker). `--selftest` verifies the solver offline.
 - `vision/heart_detect_test.py` — offline check: grab N Realsense frames (hand-move the
   limp arm between grabs), run the heart detector on each, save annotated overlays. Used
-  to tune the teal gate (measured 6/8 recall, 0 false picks on the 2026-06-11 capture).
+  to tune the color gates against real lighting before trusting them live.
 
 **Analysis:**
 - `analyze_run.py` — offline analysis of a `station.py` run: gravity-removed wrist
@@ -240,9 +243,11 @@ Reapply after a fresh lerobot clone: `git -C lerobot apply ../patches/lerobot_lo
 - [x] Unified cockpit `station.py` — motors + IMU + gamepad in one Rerun window,
       synced CSV logging (`station.csv` + `imu.csv` on a shared clock)
 - [x] **YOLO ball detection → 3D point** (`vision/ball_yolo.py`, pretrained model)
-- [~] **Hand-eye calibration tool built** (`vision/handeye_calib.py`): teal-heart marker
-      via Grounding DINO + in-box teal gate, MuJoCo FK of `gripper`, joint T_cam→base +
-      offset solver (self-test passes). **Pending:** the live capture run on hardware.
+- [x] **Hand-eye calibration done** (`vision/handeye_calib.py`): pink-heart marker via
+      Grounding DINO + in-box color gate, MuJoCo FK of `gripper`, joint T_cam→base +
+      offset solver. Live run 2026-06-11: **4.6 mm RMS over 16 poses** →
+      `outputs/calib/handeye.json` (cam 471 mm above base, looking straight down).
+      See `vision/HANDEYE.md` for how/why.
 - [ ] **Run tuning on the real arm** (not done yet — start shoulder_pan at 7.5 V)
 - [ ] Use synced IMU + motor logs to calibrate servo coefficients / ID resonance
 - [ ] Revisit `graceful_shutdown` — Ctrl-C rest-pose move was abrupt/noisy (tune

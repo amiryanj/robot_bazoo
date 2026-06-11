@@ -2,12 +2,12 @@
 """
 Hand-eye calibration (eye-to-hand): estimate T_cam->base for the top-down Realsense.
 
-Marker = the TEAL heart sticker on the `gripper` body (the wrist_roll part), so it
-rotates with wrist_roll but is independent of the gripper opening (it's on the body,
-not the moving jaw). It sits on top of the gripper, facing the ceiling camera, so it
-stays visible across poses (the finger hearts face sideways and are barely seen
-top-down). We drive the arm to many poses (gamepad teleop), and at each captured pose:
-  - detect the teal heart in the color image -> centroid pixel,
+Marker = the PINK heart sticker on a gripper finger. The fingers move with the gripper
+joint, so KEEP THE GRIPPER OPENING FIXED (ideally closed) for the whole capture run —
+then the heart is rigid w.r.t. the `gripper` body (the wrist_roll part) and the existing
+FK + constant-offset solver apply unchanged. We drive the arm to many poses (gamepad
+teleop), and at each captured pose:
+  - detect the pink heart in the color image -> centroid pixel,
   - back-project through the aligned depth -> 3-D point in the CAMERA frame,
   - read joint angles -> MuJoCo FK of the `gripper` body -> its pose in the BASE frame.
 
@@ -42,30 +42,31 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 SERIAL = "117222251972"
 XML = str(ROOT / "SO-ARM100/Simulation/SO101/scene.xml")
-MARKER_BODY = "gripper"            # teal heart is on the wrist_roll part = `gripper` body
+MARKER_BODY = "gripper"            # finger heart, rigid w.r.t. this body at fixed opening
 OUT = ROOT / "outputs/calib"
 
 WORKSPACE_Z = (0.20, 1.2)          # metres; valid marker depth band
 
-# The calibration marker is the TEAL heart. We find hearts with a learned zero-shot
+# The calibration marker is the PINK finger heart. We find hearts with a learned zero-shot
 # detector (Grounding DINO) — robust to clutter (piano keys, wood) that fools colour
-# segmentation — then pick the teal one. Colour ID *inside* a confirmed heart box is
+# segmentation — then pick the pink one. Colour ID *inside* a confirmed heart box is
 # reliable; it's colour-only segmentation across the whole frame that's not.
 GDINO_ID = "IDEA-Research/grounding-dino-tiny"
 GDINO_THR = 0.12                   # low: catches faint heart boxes (conf 0.18-0.44). Safe
-                                   # because the tight HSV band below — not the threshold —
-                                   # rejects background teal. Measured 6/8 recall, 0 false.
-# Razor-clean teal band measured on the 8-pose 2026-06-11 capture: the teal heart sits at
-# H 92-95, S 209-243, while all clutter is bluer (H>=101: keyboard/bag) or low-saturation.
-# H<=98 + S>=180 separates them perfectly. (Yellow/pink finger hearts wash out, S 74-87.)
-TEAL_LO = (88, 180, 60)            # HSV (OpenCV H 0-180); only applied within heart boxes
-TEAL_HI = (98, 255, 255)
-# The teal marker is a SMALL box that is MOSTLY teal. Gating on teal *fraction* (not raw
+                                   # because the HSV band below — not the threshold —
+                                   # rejects non-pink clutter.
+# Pink is the HSV wrap-around colour: the sticker measured H 160-166 in midday light but
+# H~0-2 under warmer light (hue wraps past 180). So gate BOTH hue ends. What separates it
+# from the red arm parts is SATURATION: the pale sticker reads S 75-103, the red plastic
+# S 136-180 — cap S at 130. (Wood/ball are H 10-25 and/or high-S: excluded.)
+PINK_BANDS = (((0, 40, 80), (10, 130, 255)),       # red-side pink (warm light)
+              ((150, 40, 80), (180, 130, 255)))    # magenta-side pink (cool light)
+# The marker is a SMALL box that is MOSTLY pink. Gating on pink *fraction* (not raw
 # count) + a size cap cleanly rejects clutter that GDINO mislabels "heart" (white table,
-# printer, the ball): those are big and/or only incidentally teal.
+# printer, the ball): those are big and/or only incidentally pink.
 MAX_HEART_PX = 70                  # a heart sticker is small top-down; table/printer aren't
-MIN_TEAL_PX = 20                   # absolute floor, guards tiny high-fraction flukes
-MIN_TEAL_FRAC = 0.15               # teal pixels / box area
+MIN_PINK_PX = 20                   # absolute floor, guards tiny high-fraction flukes
+MIN_PINK_FRAC = 0.10               # pink pixels / box area (GDINO boxes run loose)
 
 MOTOR_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex",
                "wrist_flex", "wrist_roll", "gripper"]
@@ -75,7 +76,7 @@ MOTOR_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex",
 
 class HeartDetector:
     """Zero-shot 'heart' detector (Grounding DINO). `hearts()` returns every heart box
-    with its teal-pixel count; `teal_uv()` picks the teal-coloured one (the wrist marker)."""
+    with its pink-pixel count; `marker_uv()` picks the pink one (the finger marker)."""
 
     def __init__(self, device):
         import torch
@@ -86,7 +87,7 @@ class HeartDetector:
         self.model = AutoModelForZeroShotObjectDetection.from_pretrained(GDINO_ID).to(device).eval()
 
     def hearts(self, color_bgr):
-        """List of ((x1,y1,x2,y2), conf, teal_px, teal_frac) for every detected heart."""
+        """List of ((x1,y1,x2,y2), conf, pink_px, pink_frac) for every detected heart."""
         import cv2
         from PIL import Image
         img = Image.fromarray(cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB))
@@ -101,18 +102,19 @@ class HeartDetector:
         for box, score in zip(res["boxes"].tolist(), res["scores"].tolist()):
             x1, y1, x2, y2 = (int(v) for v in box)
             sub = hsv[max(y1, 0):y2, max(x1, 0):x2]
-            teal = int(cv2.inRange(sub, TEAL_LO, TEAL_HI).sum() / 255) if sub.size else 0
-            frac = teal / max((x2 - x1) * (y2 - y1), 1)
-            boxes.append(((x1, y1, x2, y2), float(score), teal, frac))
+            pink = int(sum(cv2.inRange(sub, lo, hi).sum() for lo, hi in PINK_BANDS) / 255) \
+                if sub.size else 0
+            frac = pink / max((x2 - x1) * (y2 - y1), 1)
+            boxes.append(((x1, y1, x2, y2), float(score), pink, frac))
         return boxes
 
-    def teal_uv(self, color_bgr):
-        """Return ((u, v) of the teal heart centre or None, all heart boxes for preview).
-        The marker is the small, mostly-teal box (max fraction among gated boxes)."""
+    def marker_uv(self, color_bgr):
+        """Return ((u, v) of the pink heart centre or None, all heart boxes for preview).
+        The marker is the small, mostly-pink box (max fraction among gated boxes)."""
         boxes = self.hearts(color_bgr)
         cand = [b for b in boxes
                 if max(b[0][2] - b[0][0], b[0][3] - b[0][1]) <= MAX_HEART_PX
-                and b[2] >= MIN_TEAL_PX and b[3] >= MIN_TEAL_FRAC]
+                and b[2] >= MIN_PINK_PX and b[3] >= MIN_PINK_FRAC]
         if not cand:
             return None, boxes
         (x1, y1, x2, y2), _, _, _ = max(cand, key=lambda b: b[3])
@@ -135,8 +137,8 @@ def backproject(u, v, depth_m, K, win=4):
 
 def make_fk():
     """Return fk(ang_deg) -> (R, t): pose of the `gripper` body (the wrist_roll part,
-    where the teal heart sits) in the base/world frame. Depends on wrist_roll but not on
-    the gripper opening (the heart is on the body, not the moving jaw)."""
+    in the base/world frame. The finger heart is rigid w.r.t. this body as long as the
+    gripper opening stays FIXED during the capture run (the offset absorbs the rest)."""
     import mujoco
     mm = mujoco.MjModel.from_xml_path(XML)
     md = mujoco.MjData(mm)
@@ -256,10 +258,25 @@ def input_thread(q):
         q.put(line.strip().lower())
 
 
+def preview_loop(detector, frame_slot, preview, stop):
+    """Run the (slow, esp. on CPU) heart detector OFF the control loop so gamepad teleop
+    stays responsive. Reads the latest frame, writes the latest (uv, boxes) for preview."""
+    while not stop.is_set():
+        fr = frame_slot[0]
+        if fr is None:
+            time.sleep(0.05)
+            continue
+        try:
+            preview[0] = detector.marker_uv(fr)
+        except Exception as e:
+            print(f"  detector error: {e!r}")
+            time.sleep(0.2)
+
+
 # ── Main calibration loop ─────────────────────────────────────────────────────────────
 
 def main():
-    ap = argparse.ArgumentParser(description="Hand-eye calibration via the teal wrist marker.")
+    ap = argparse.ArgumentParser(description="Hand-eye calibration via the pink finger heart.")
     ap.add_argument("--selftest", action="store_true", help="Offline solver/FK check, no hardware.")
     ap.add_argument("--port", default="/dev/ttyACM1")
     ap.add_argument("--min-poses", type=int, default=10)
@@ -294,6 +311,11 @@ def main():
     robot.connect()
 
     rr.init("handeye_calib", spawn=True)
+    # explicit blueprint: one camera view (image + heart boxes + green marker dot).
+    # Overrides the viewer's saved layout from older runs (e.g. the dead cam/mask panel).
+    import rerun.blueprint as rrb
+    rr.send_blueprint(rrb.Blueprint(rrb.Spatial2DView(origin="cam", name="camera"),
+                                    collapse_panels=True))
     pygame.init()
     joystick = None
     smoother = DeltaSmoother(alpha=0.45)
@@ -303,9 +325,17 @@ def main():
     cmd_q = queue.Queue()
     threading.Thread(target=input_thread, args=(cmd_q,), daemon=True).start()
 
+    # detection runs in its own thread so teleop never waits on it (esp. on CPU)
+    frame_slot = [None]                # latest color frame for the detector
+    preview = [(None, [])]             # latest (uv, boxes) from the detector
+    det_stop = threading.Event()
+    threading.Thread(target=preview_loop,
+                     args=(detector, frame_slot, preview, det_stop), daemon=True).start()
+
     samples = []                       # list of dict(p_cam, R_w, t_w, ang)
-    print(f"\nDrive the arm so the TEAL heart is well in view, then 'c' to capture. "
-          f"Need >= {args.min_poses}. 'u' undo, 'q' finish & solve.\n")
+    print(f"\nDrive the arm so the PINK finger heart is well in view, then 'c' to capture. "
+          f"Need >= {args.min_poses}. 'u' undo, 'q' finish & solve.\n"
+          f"  ⚠ Keep the gripper opening FIXED (ideally closed) for the whole run.\n")
 
     try:
         while True:
@@ -325,21 +355,22 @@ def main():
 
             obs = robot.get_observation()
             color, depth, K = cam.grab()
+            frame_slot[0] = color          # hand the frame to the detector thread
 
-            # live preview + marker lock to Rerun
-            uv, boxes = detector.teal_uv(color)
+            # live preview + marker lock to Rerun (detection result comes from the thread)
+            uv, boxes = preview[0]
             rr.log("cam/image", rr.Image(cv2.cvtColor(color, cv2.COLOR_BGR2RGB)))
             if boxes:
                 rr.log("cam/hearts", rr.Boxes2D(
                     array=[[x1, y1, x2 - x1, y2 - y1] for (x1, y1, x2, y2), *_ in boxes],
                     array_format=rr.Box2DFormat.XYWH,
-                    labels=[f"{c:.2f} teal={f:.2f}" for _, c, _, f in boxes]))
+                    labels=[f"{c:.2f} pink={f:.2f}" for _, c, _, f in boxes]))
             else:
                 rr.log("cam/hearts", rr.Clear(recursive=False))
             if uv is not None:
-                rr.log("cam/teal", rr.Points2D([list(uv)], radii=8, colors=[(0, 255, 0)]))
+                rr.log("cam/marker", rr.Points2D([list(uv)], radii=8, colors=[(0, 255, 0)]))
             else:
-                rr.log("cam/teal", rr.Clear(recursive=False))
+                rr.log("cam/marker", rr.Clear(recursive=False))
 
             # commands
             handled = False
@@ -354,8 +385,8 @@ def main():
                 elif c in ("c", "", "cap"):
                     if uv is None:
                         n_h = len(boxes)
-                        print(f"  no teal heart found ({n_h} heart(s) detected, none teal enough) — "
-                              f"reposition so the teal wrist heart faces the camera")
+                        print(f"  no pink heart found ({n_h} heart(s) detected, none pink enough) — "
+                              f"reposition so the pink finger heart faces the camera")
                         continue
                     p_cam = backproject(*uv, depth, K)
                     if p_cam is None:
@@ -376,6 +407,7 @@ def main():
     except Exception as e:
         print(f"\nUnexpected error: {e!r}\nLanding the arm safely...")
     finally:
+        det_stop.set()
         cam.stop()
         graceful_shutdown(robot)
         try:

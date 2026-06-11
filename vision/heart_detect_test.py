@@ -3,7 +3,7 @@
 to validate detection across poses before trusting it for hand-eye calibration.
 
 Torque is off after a calibration run, so between grabs just HAND-MOVE the limp arm to
-a new pose. Each frame: detect hearts (Grounding DINO), pick the teal wrist marker, save
+a new pose. Each frame: detect hearts (Grounding DINO), pick the pink finger marker, save
 an annotated overlay + the raw frame + per-frame JSON to outputs/vision/<ts>_hearts/.
 
     python vision/heart_detect_test.py            # 8 frames, 3 s apart
@@ -21,12 +21,12 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "vision"))
-from handeye_calib import HeartDetector, Realsense, MIN_TEAL_PX  # noqa: E402
+from handeye_calib import HeartDetector, Realsense  # noqa: E402
 
 
 def annotate(bgr, boxes, uv):
     vis = bgr.copy()
-    for (x1, y1, x2, y2), conf, teal, frac in boxes:
+    for (x1, y1, x2, y2), conf, pink, frac in boxes:
         pick = uv is not None and ((x1 + x2) // 2, (y1 + y2) // 2) == uv
         col = (0, 255, 0) if pick else (0, 200, 255)
         cv2.rectangle(vis, (x1, y1), (x2, y2), col, 3 if pick else 2)
@@ -61,21 +61,21 @@ def main():
                 print(f"  frame {i+1}/{args.frames} in {s}s ...", end="\r", flush=True)
                 time.sleep(1)
             color, depth, K = cam.grab()
-            uv, boxes = det.teal_uv(color)
+            uv, boxes = det.marker_uv(color)
             cv2.imwrite(str(out / f"frame_{i:02d}.png"), color)
             cv2.imwrite(str(out / f"frame_{i:02d}_det.png"), annotate(color, boxes, uv))
-            rec = dict(frame=i, teal_uv=uv, n_hearts=len(boxes),
-                       boxes=[dict(box=b, conf=c, teal_px=t, teal_frac=round(f, 3))
+            rec = dict(frame=i, marker_uv=uv, n_hearts=len(boxes),
+                       boxes=[dict(box=b, conf=c, pink_px=t, pink_frac=round(f, 3))
                               for b, c, t, f in boxes])
             summary.append(rec)
-            tag = f"teal@{uv}" if uv else "NO teal marker"
+            tag = f"pink@{uv}" if uv else "NO pink marker"
             print(f"  frame {i+1}/{args.frames}: {len(boxes)} heart(s), {tag}        ")
     finally:
         cam.stop()
 
     json.dump(summary, open(out / "summary.json", "w"), indent=2)
-    hit = sum(1 for r in summary if r["teal_uv"])
-    print(f"\nTeal marker found in {hit}/{len(summary)} frames. Overlays: {out}/frame_*_det.png")
+    hit = sum(1 for r in summary if r["marker_uv"])
+    print(f"\nPink marker found in {hit}/{len(summary)} frames. Overlays: {out}/frame_*_det.png")
 
 
 if __name__ == "__main__":
