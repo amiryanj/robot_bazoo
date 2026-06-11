@@ -326,6 +326,7 @@ def build_blueprint(args) -> rrb.Blueprint:
         rrb.TimeSeriesView(origin="motors",          name="Motors"),
         rrb.TimeSeriesView(origin="imu/wrist_roll",  name="IMU (wrist_roll)"),
         rrb.Spatial2DView(origin="controller",       name="Controller"),
+        rrb.TimeSeriesView(origin="diagnostics",      name="Loop rate (Hz)"),
     ]
     if args.cameras:
         views.append(rrb.Spatial2DView(origin="cameras", name="Cameras"))
@@ -346,6 +347,37 @@ def make_robot_config(args):
                 index_or_path=15, fps=25, width=640, height=480)
     return SOFollowerRobotConfig(port=args.port, id=ROBOT_ID, cameras=cameras)
 
+def detection_loop(detector, ball_class, t0, stop, frame_slot, conf=0.25):
+    """Run YOLO ball detection OFF the control loop, in its own thread, so teleop
+    stays at full rate. Reads the most recent realsense frame from frame_slot[0]
+    (RGB) and logs the 2-D box to Rerun. Detection runs as fast as the GPU allows,
+    decoupled from the motor poll rate."""
+    import cv2
+    last = None
+    while not stop.is_set():
+        frame = frame_slot[0]
+        if frame is None or frame is last:      # nothing new since last inference
+            time.sleep(0.01)
+            continue
+        last = frame
+        try:
+            res = detector(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR), conf=conf, verbose=False)[0]
+            best = None
+            for c, p, b in zip(res.boxes.cls, res.boxes.conf, res.boxes.xyxy):
+                if res.names[int(c)] == ball_class and (best is None or float(p) > best[0]):
+                    best = (float(p), [float(v) for v in b])
+            rr.set_time("time", duration=time.perf_counter() - t0)
+            if best is not None:
+                score, (x1, y1, x2, y2) = best
+                rr.log("cameras/realsense/ball", rr.Boxes2D(
+                    array=[[x1, y1, x2 - x1, y2 - y1]],
+                    array_format=rr.Box2DFormat.XYWH, labels=[f"ball {score:.2f}"]))
+            else:
+                rr.log("cameras/realsense/ball", rr.Clear(recursive=False))
+        except Exception as e:
+            print(f"  Ball detection error ({e}); detector thread stopping, teleop continues.")
+            return
+
 # ── Main ─────────────────────────────────────────────────────────────────────────
 
 def main():
@@ -356,6 +388,8 @@ def main():
     parser.add_argument("--cameras", action="store_true", help="Stream realsense + wrist images to Rerun.")
     parser.add_argument("--no-realsense", action="store_true", help="With --cameras, skip the realsense.")
     parser.add_argument("--no-wrist", action="store_true", help="With --cameras, skip the wrist cam.")
+    parser.add_argument("--detect-ball", action="store_true",
+                        help="With --cameras, run YOLO ball detection on the realsense feed (2-D box in Rerun).")
     parser.add_argument("--twin", action="store_true", help="Launch the MuJoCo 3-D twin viewer.")
     parser.add_argument("--no-imu", action="store_true", help="Skip the ADXL345 IMU thread.")
     parser.add_argument("--no-log", action="store_true", help="Skip the CSV log.")
@@ -394,6 +428,24 @@ def main():
     obs = robot.get_observation()
     goal_pos = {n: obs.get(f"{n}.pos", 0.0) for n in MOTOR_NAMES}
 
+    # ── Ball detector (optional) ─────────────────────────────────────────────────
+    # Load + warm up BEFORE Rerun spawns its GPU viewer, so torch's CUDA init can't
+    # race Rerun's Vulkan init ("device busy"). Fault-tolerant: any failure just
+    # disables detection — vision is auxiliary and must never block arm control.
+    detector = None
+    if args.detect_ball and args.cameras and not args.no_realsense:
+        try:
+            import cv2  # noqa: F401  (used in the loop)
+            sys.path.insert(0, str(Path(__file__).resolve().parent / "vision"))
+            from ball_yolo import load_model, BALL_CLASS
+            print("Loading ball detector...")
+            detector = load_model()
+            detector(np.zeros((480, 640, 3), np.uint8), verbose=False)  # warm up CUDA now
+            print("Ball detector ready.")
+        except Exception as e:
+            print(f"  Ball detector unavailable ({e}); continuing without detection.")
+            detector = None
+
     # ── Rerun (auto-opens a viewer with a default layout) ───────────────────────
     rr.init("so101_station", spawn=True)
     rr.send_blueprint(build_blueprint(args))
@@ -413,6 +465,16 @@ def main():
     if not args.no_imu:
         imu_t = threading.Thread(target=imu_loop, args=(t0, imu_stop, log_dir), daemon=True)
         imu_t.start()
+
+    # Ball detection runs in its own thread so YOLO never throttles the control loop.
+    detect_stop = threading.Event()
+    detect_t = None
+    frame_slot = [None]                         # latest realsense RGB frame (shared)
+    if detector is not None:
+        detect_t = threading.Thread(target=detection_loop,
+                                    args=(detector, BALL_CLASS, t0, detect_stop, frame_slot),
+                                    daemon=True)
+        detect_t.start()
 
     # ── Joystick (headless) ─────────────────────────────────────────────────────
     pygame.init()
@@ -441,6 +503,7 @@ def main():
           + "Ctrl-C to stop.\n")
 
     dt = 1.0 / args.rate
+    prev_loop = None
     error_counts = {n: 0 for n in MOTOR_NAMES}
     writer = None
     csv_f = None
@@ -479,6 +542,9 @@ def main():
 
             # ── read motors → Rerun + CSV ────────────────────────────────────────
             rr.set_time("time", duration=t_rel)
+            if prev_loop is not None:
+                rr.log("diagnostics/loop_hz", rr.Scalars(1.0 / max(loop_start - prev_loop, 1e-6)))
+            prev_loop = loop_start
             obs = robot.get_observation()
 
             for name in MOTOR_NAMES:
@@ -539,6 +605,8 @@ def main():
                     frame = obs.get(cam)
                     if isinstance(frame, np.ndarray):
                         rr.log(f"cameras/{cam}", rr.Image(frame))
+                        if detector is not None and cam == "realsense":
+                            frame_slot[0] = frame      # hand off to the detector thread
 
             if twin:
                 import math
@@ -553,10 +621,17 @@ def main():
 
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        # Any unexpected loop error: report it, but still fall through to finally
+        # so the arm always gets a smooth landing (never left torque-on / collapsing).
+        print(f"\nUnexpected error: {e!r}\nLanding the arm safely...")
     finally:
         imu_stop.set()
         if imu_t:
             imu_t.join(timeout=1.0)   # let the IMU thread flush + close imu.csv
+        detect_stop.set()
+        if detect_t:
+            detect_t.join(timeout=1.0)
         if twin:
             twin.close()
         graceful_shutdown(robot)
