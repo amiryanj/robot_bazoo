@@ -36,21 +36,13 @@ def load_model(path=MODEL):
     return YOLO(str(path))
 
 
-def localize_ball_yolo(color, depth, K, model, plane=None, conf=0.25):
-    """Detect the ball with YOLO -> 3D centre (camera frame) + radius. None if not found.
+def ball_from_box(box, score, depth, K, plane=None):
+    """2-D ball box -> 3D centre (camera frame) + radius, detector-agnostic.
 
     The box centre pixel is back-projected through its depth to the visible cap
     (top of the ball, top-down). The true centre sits ~one radius behind that,
     toward the table (along the plane normal if given, else +Z)."""
-    res = model(color, conf=conf, verbose=False)[0]
-
-    best = None                                          # highest-conf Basketball box
-    for c, p, b in zip(res.boxes.cls, res.boxes.conf, res.boxes.xyxy):
-        if res.names[int(c)] == BALL_CLASS and (best is None or float(p) > best[0]):
-            best = (float(p), [int(v) for v in b])
-    if best is None:
-        return None
-    score, (x1, y1, x2, y2) = best
+    x1, y1, x2, y2 = box
     u, v = (x1 + x2) // 2, (y1 + y2) // 2
 
     # robust surface depth: median of valid in-workspace depth in the box's central
@@ -78,6 +70,19 @@ def localize_ball_yolo(color, depth, K, model, plane=None, conf=0.25):
 
     return dict(center3d=center, surface3d=surface, radius_m=radius_m,
                 uv=(u, v), box=(x1, y1, x2, y2), conf=score)
+
+
+def localize_ball_yolo(color, depth, K, model, plane=None, conf=0.25):
+    """Detect the ball with YOLO -> 3D centre (camera frame) + radius. None if not found."""
+    res = model(color, conf=conf, verbose=False)[0]
+
+    best = None                                          # highest-conf Basketball box
+    for c, p, b in zip(res.boxes.cls, res.boxes.conf, res.boxes.xyxy):
+        if res.names[int(c)] == BALL_CLASS and (best is None or float(p) > best[0]):
+            best = (float(p), [int(v) for v in b])
+    if best is None:
+        return None
+    return ball_from_box(best[1], best[0], depth, K, plane)
 
 
 # ── verification harness ──────────────────────────────────────────────────────────

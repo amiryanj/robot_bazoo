@@ -1,0 +1,462 @@
+#!/usr/bin/env python
+"""Localize the mini-basketball with the top-down Realsense and grab it.
+
+Pipeline (critical-path step 3, first iteration):
+  ball_yolo (2-D box + depth -> ball centre, cam frame)
+  -> handeye.json (T_cam->base from vision/handeye_calib.py)
+  -> MuJoCo numeric IK (same model the calibration validated end-to-end)
+  -> slow scripted sequence: above ball -> descend -> close -> lift -> put back -> rest.
+
+Usage:
+    python pick_ball.py --selftest    # offline IK check, no hardware
+    python pick_ball.py --dry-run     # detect + print base-frame ball position, no arm
+    python pick_ball.py               # the real thing (asks once before moving)
+
+The arm ALWAYS lands via graceful_shutdown, whatever happens.
+"""
+import argparse
+import json
+import math
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "vision"))
+
+XML = str(ROOT / "SO-ARM100/Simulation/SO101/scene.xml")
+HANDEYE = ROOT / "outputs/calib/handeye.json"
+TCP_SITE = "gripperframe"
+ARM_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
+MOTOR_NAMES = ARM_JOINTS + ["gripper"]
+
+# workspace sanity bounds for the detected ball, base frame (metres)
+BALL_X = (0.12, 0.42)
+BALL_Y = (-0.30, 0.30)
+BALL_Z = (-0.02, 0.12)
+
+APPROACH_CLEAR = 0.05      # pre-grasp clearance back along the fingers (m)
+LIFT_CLEAR = 0.08          # lift height above grasp (m)
+GRIP_OPEN = 70.0           # gripper command while approaching (0=closed, 100=open)
+MOVE_SECONDS = 2.5         # per segment, linear joint interpolation
+RATE = 20                  # interpolation steps/s
+
+
+# ── Kinematics: FK + damped-least-squares IK on the validated MuJoCo model ──────────
+
+class Kin:
+    def __init__(self):
+        import mujoco
+        self.mj = mujoco
+        self.m = mujoco.MjModel.from_xml_path(XML)
+        self.d = mujoco.MjData(self.m)
+        self.adr = {j: self.m.jnt_qposadr[mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_JOINT, j)]
+                    for j in MOTOR_NAMES}
+        self.sid = mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_SITE, TCP_SITE)
+        self.lim = {j: np.degrees(self.m.jnt_range[
+            mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_JOINT, j)]) for j in ARM_JOINTS}
+        # dof (velocity-space) indices of the arm joints, for jacobian columns
+        self.dof = [self.m.jnt_dofadr[self.mj.mj_name2id(self.m, self.mj.mjtObj.mjOBJ_JOINT, j)]
+                    for j in ARM_JOINTS]
+
+    def fk(self, ang_deg):
+        for j, a in self.adr.items():
+            self.d.qpos[a] = math.radians(ang_deg.get(j, 0.0))
+        self.mj.mj_forward(self.m, self.d)
+        R = self.d.site_xmat[self.sid].reshape(3, 3).copy()
+        return R, self.d.site_xpos[self.sid].copy()
+
+    def _ik_pass(self, p_target, ang, iters, damping, w_rot):
+        jacp = np.zeros((3, self.m.nv))
+        jacr = np.zeros((3, self.m.nv))
+        down = np.array([0.0, 0.0, -1.0])
+        cols = self.dof[:4]                              # pan, lift, elbow, wrist_flex
+        for _ in range(iters):
+            R, p = self.fk(ang)
+            e_pos = p_target - p
+            e_rot = np.cross(R[:, 0], down)              # rotation pulling x-axis onto -Z
+            if np.linalg.norm(e_pos) < 5e-4 and w_rot * np.linalg.norm(e_rot) < 0.01:
+                break
+            self.mj.mj_jacSite(self.m, self.d, jacp, jacr, self.sid)
+            J = np.vstack([jacp[:, cols + [self.dof[4]]],     # position: all 5 joints
+                           w_rot * jacr[:, cols + [self.dof[4]]]])
+            e = np.concatenate([e_pos, w_rot * e_rot])
+            dq = np.linalg.solve(J.T @ J + damping * np.eye(J.shape[1]), J.T @ e)
+            for k, j in enumerate(ARM_JOINTS[:4]):
+                ang[j] = float(np.clip(ang[j] + math.degrees(dq[k]),
+                                       self.lim[j][0], self.lim[j][1]))
+            # wrist_roll (dq[4]) intentionally not applied
+
+    def ik(self, p_target, ang0, iters=300, damping=2e-3, w_rot=0.2):
+        """Joint angles (deg) putting the TCP at p_target, fingers pointing downward as
+        a SOFT preference only — POSITION DOMINATES: if it hasn't converged, the
+        orientation weight is decayed so the solver trades tilt for reach (a sphere
+        tolerates a tilted grasp; far targets need ~60deg tilt). wrist_roll is held at
+        ang0's value. Returns (angles, pos_err_m, axis_err_deg)."""
+        ang = dict(ang0)
+        self._ik_pass(p_target, ang, iters, damping, w_rot)
+        for w in (0.05, 0.01, 0.0):
+            _, p = self.fk(ang)
+            if np.linalg.norm(p_target - p) < 0.006:
+                break
+            self._ik_pass(p_target, ang, 150, damping, w)
+        R, p = self.fk(ang)
+        axis_err = math.degrees(math.acos(np.clip(-R[2, 0], -1, 1)))
+        return ang, float(np.linalg.norm(p_target - p)), axis_err
+
+    def approach_axis(self, ang):
+        """Unit vector the fingers point along (site x-axis) at this pose."""
+        R, _ = self.fk(ang)
+        return R[:, 0]
+
+
+# fingers point down when shoulder_lift + elbow_flex + wrist_flex = +90 (model FK).
+# DLS is local, so try several postures along that constraint and keep the best —
+# far targets need the lean-forward branch, near ones the crouch.
+IK_SEEDS = [{"shoulder_lift": lift, "elbow_flex": elbow, "wrist_flex": 90 - lift - elbow,
+             "shoulder_pan": 0.0, "wrist_roll": 0.0, "gripper": 0.0}
+            for lift, elbow in ((-20, 50), (10, 20), (30, 0), (45, -20), (0, 60))]
+
+
+def ik_best(kin, p_target):
+    best = None
+    for seed in IK_SEEDS:
+        sol = kin.ik(np.array(p_target), seed)
+        if best is None or (sol[1] + 0.01 * sol[2]) < (best[1] + 0.01 * best[2]):
+            best = sol
+    return best
+
+
+def plan_waypoints(kin, p_base):
+    """IK the grasp (strict), then an approach waypoint backed off ALONG THE FINGERS.
+    The approach is a via point — the IK's closest reachable pose to the ideal
+    clearance is fine; only the grasp needs precision. Returns
+    (above, grasp, grasp_err_m, tilt_deg, above_err_m)."""
+    grasp, e_g, tilt = ik_best(kin, p_base)
+    u = kin.approach_axis(grasp)                          # points from wrist toward ball
+    above, e_a, _ = kin.ik(np.asarray(p_base) - APPROACH_CLEAR * u, grasp)
+    return above, grasp, e_g, tilt, e_a
+
+
+def selftest():
+    kin = Kin()
+    ok = True
+    for target in ([0.26, 0.05, 0.03], [0.29, -0.08, 0.03], [0.20, 0.12, 0.03],
+                   [0.36, 0.0, -0.004]):                  # far: needs a tilted grasp
+        above, grasp, e_g, tilt, e_a = plan_waypoints(kin, target)
+        line = (f"  ball={np.round(target, 3)}  grasp_err={e_g * 1000:.1f}mm  "
+                f"tilt={tilt:.0f}deg  approach_short={e_a * 1000:.0f}mm  "
+                f"q={[round(grasp[j], 1) for j in ARM_JOINTS[:4]]}")
+        good = e_g < 0.008 and tilt < 70 and e_a < 0.05
+        ok &= good
+        print(("OK " if good else "FAIL") + line)
+    print("SELFTEST", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+# ── Perception: ball in the base frame ───────────────────────────────────────────────
+
+class BallDetector:
+    """Grounding DINO, zero-shot prompt "basketball." — the basketball-specific YOLO
+    (vision/models/basketball.pt) failed on the mini ball against the white mat
+    (conf 0.00 vs GDINO 0.76 on the same frame). Same lesson as the heart marker:
+    the zero-shot detector generalizes to this scene, the specialist doesn't."""
+
+    def __init__(self, device=None):
+        import torch
+        from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+        self.torch = torch
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        mid = "IDEA-Research/grounding-dino-tiny"
+        self.proc = AutoProcessor.from_pretrained(mid)
+        self.model = AutoModelForZeroShotObjectDetection.from_pretrained(mid).to(self.device).eval()
+
+    def detect(self, color_bgr, thr=0.3):
+        """Highest-conf ball box -> ((x1,y1,x2,y2), conf) or (None, 0)."""
+        import cv2
+        from PIL import Image
+        img = Image.fromarray(cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB))
+        inp = self.proc(images=img, text="basketball.", return_tensors="pt").to(self.device)
+        with self.torch.no_grad():
+            out = self.model(**inp)
+        res = self.proc.post_process_grounded_object_detection(
+            out, inp.input_ids, threshold=thr, text_threshold=thr,
+            target_sizes=[img.size[::-1]])[0]
+        best = None
+        for box, score in zip(res["boxes"].tolist(), res["scores"].tolist()):
+            if best is None or score > best[1]:
+                best = ([int(v) for v in box], float(score))
+        return best if best else (None, 0.0)
+
+
+def localize_base(detector=None):
+    """Grab a frame, detect the ball, return (p_base, info dict). Always saves the
+    frame + detection overlay to outputs/vision/pick_<ts>/ for debugging."""
+    import cv2
+    from datetime import datetime
+    from ball import deproject, fit_table_plane, WORKSPACE_Z
+    from ball_yolo import ball_from_box
+    from handeye_calib import Realsense
+
+    he = json.load(open(HANDEYE))
+    R_cb, t_cb = np.array(he["R"]), np.array(he["t"])
+
+    detector = detector or BallDetector()
+    cam = Realsense()
+    try:
+        color, depth, K = cam.grab()
+    finally:
+        cam.stop()
+
+    pts = deproject(depth, K).reshape(-1, 3)
+    valid = pts[(pts[:, 2] > WORKSPACE_Z[0]) & (pts[:, 2] < WORKSPACE_Z[1])]
+    n, pd, _ = fit_table_plane(valid)
+    box, score = detector.detect(color)
+    ball = ball_from_box(box, score, depth, K, plane=(n, pd)) if box else None
+
+    out = ROOT / "outputs/vision" / f"pick_{datetime.now():%Y-%m-%d_%H-%M-%S}"
+    out.mkdir(parents=True, exist_ok=True)
+    overlay = color.copy()
+    if ball is not None:
+        x1, y1, x2, y2 = ball["box"]
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.circle(overlay, ball["uv"], 4, (0, 0, 255), -1)
+    cv2.imwrite(str(out / "frame.png"), color)
+    cv2.imwrite(str(out / "overlay.png"), overlay)
+    print(f"  debug frames -> {out}")
+
+    if ball is None:
+        return None, None
+    p_base = R_cb @ ball["center3d"] + t_cb
+    # z comes FROM DEPTH (ball top - radius along the ray): it stays honest when the
+    # ball sits on a holder. The RANSAC plane is only a reference — and with the white
+    # plate (~1cm) on the wooden desk there are TWO planes; the fit may land on either.
+    n_b = R_cb @ n
+    d_b = pd - n_b @ t_cb
+    z_table = -(d_b + n_b[0] * p_base[0] + n_b[1] * p_base[1]) / n_b[2]
+    above = (p_base[2] - ball["radius_m"]) - z_table
+    print(f"  z(depth)={p_base[2] * 1000:.0f}mm; fitted plane at {z_table * 1000:.0f}mm -> "
+          f"ball bottom {above * 1000:+.0f}mm above it "
+          f"({'resting on it' if abs(above) < 0.012 else 'raised — holder? other plane?'})")
+    ball["z_table"] = float(z_table)
+    return p_base, ball
+
+
+def watch():
+    """Live Rerun preview: frame + ball box + conf, until Ctrl-C. For aiming/setup."""
+    import cv2
+    import rerun as rr
+    import rerun.blueprint as rrb
+    from handeye_calib import Realsense
+
+    detector = BallDetector()
+    print(f"Detector on {detector.device}. Ctrl-C to stop.")
+    cam = Realsense()
+    rr.init("pick_ball", spawn=True)
+    rr.send_blueprint(rrb.Blueprint(rrb.Spatial2DView(origin="cam", name="ball watch"),
+                                    collapse_panels=True))
+    try:
+        while True:
+            color, depth, K = cam.grab()
+            box, score = detector.detect(color)
+            rr.log("cam/image", rr.Image(cv2.cvtColor(color, cv2.COLOR_BGR2RGB)))
+            if box:
+                x1, y1, x2, y2 = box
+                rr.log("cam/ball", rr.Boxes2D(array=[[x1, y1, x2 - x1, y2 - y1]],
+                                              array_format=rr.Box2DFormat.XYWH,
+                                              labels=[f"ball {score:.2f}"]))
+            else:
+                rr.log("cam/ball", rr.Clear(recursive=False))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        cam.stop()
+
+
+# ── Digital twin (MuJoCo viewer: scene + detected ball + mirrored joints) ────────────
+
+class Twin:
+    def __init__(self, p_ball, radius, z_table=None):
+        import mujoco
+        import mujoco.viewer
+        self.mj = mujoco
+        scene_dir = Path(XML).parent
+        # the scene's floor is at z=0 but the REAL table measures ~-29mm in base coords
+        # (model origin is partway up the base plate) — draw the measured table too,
+        # else the ball renders buried in the visual floor and looks mislocalized.
+        table = ""
+        if z_table is not None:
+            table = (f'<geom name="table_twin" type="box" size="0.45 0.45 0.002" '
+                     f'pos="0.25 0 {z_table - 0.002:.4f}" rgba="0.8 0.75 0.65 0.6" '
+                     f'contype="0" conaffinity="0"/>')
+        wrapper = scene_dir / "_pick_twin.xml"   # in scene dir so includes/assets resolve
+        wrapper.write_text(f"""<mujoco model="pick_twin">
+  <include file="scene.xml"/>
+  <worldbody>
+    <geom name="ball_twin" type="sphere" size="{radius:.4f}"
+          pos="{p_ball[0]:.4f} {p_ball[1]:.4f} {p_ball[2]:.4f}"
+          rgba="0.95 0.5 0.15 1" contype="0" conaffinity="0"/>
+    {table}
+  </worldbody>
+</mujoco>""")
+        try:
+            self.m = mujoco.MjModel.from_xml_path(str(wrapper))
+        finally:
+            wrapper.unlink(missing_ok=True)
+        self.d = mujoco.MjData(self.m)
+        self.adr = {j: self.m.jnt_qposadr[mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_JOINT, j)]
+                    for j in MOTOR_NAMES}
+        self.viewer = mujoco.viewer.launch_passive(self.m, self.d)
+
+    def set(self, ang_deg):
+        for j, a in self.adr.items():
+            self.d.qpos[a] = math.radians(ang_deg.get(j, 0.0))
+        self.mj.mj_forward(self.m, self.d)
+        self.viewer.sync()
+
+    def close(self):
+        try:
+            self.viewer.close()
+        except Exception:
+            pass
+
+
+# ── Motion helpers ───────────────────────────────────────────────────────────────────
+
+def read_angles(robot):
+    obs = robot.get_observation()
+    return {n: obs.get(f"{n}.pos", 0.0) for n in MOTOR_NAMES}
+
+
+def move_to(robot, start, goal, seconds=MOVE_SECONDS, twin=None):
+    """Slow linear joint-space interpolation start -> goal."""
+    steps = max(int(seconds * RATE), 1)
+    for i in range(1, steps + 1):
+        a = i / steps
+        cmd = {n: start[n] + a * (goal[n] - start[n]) for n in MOTOR_NAMES}
+        robot.send_action({f"{n}.pos": cmd[n] for n in MOTOR_NAMES})
+        if twin:
+            twin.set(cmd)
+        time.sleep(1.0 / RATE)
+    return dict(goal)
+
+
+def close_on_ball(robot, pose, twin=None):
+    """Close the gripper in small steps until the measured position stops following
+    the command (contact) or it reaches near-closed. Returns the final command pose."""
+    cmd = dict(pose)
+    for g in np.arange(pose["gripper"], 2.0, -3.0):
+        cmd["gripper"] = float(g)
+        robot.send_action({f"{n}.pos": cmd[n] for n in MOTOR_NAMES})
+        if twin:
+            twin.set(cmd)
+        time.sleep(0.15)
+        meas = read_angles(robot)["gripper"]
+        if meas - g > 8.0:                                # jaws stalled on the ball
+            cmd["gripper"] = float(meas - 4.0)            # squeeze a little, not max
+            robot.send_action({f"{n}.pos": cmd[n] for n in MOTOR_NAMES})
+            print(f"  contact: gripper held at {meas:.0f}, commanding {cmd['gripper']:.0f}")
+            return cmd
+    print("  gripper closed without clear contact (ball smaller than expected?)")
+    return cmd
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────────────
+
+def main():
+    ap = argparse.ArgumentParser(description="Localize and grab the mini-basketball.")
+    ap.add_argument("--selftest", action="store_true", help="Offline IK check, no hardware.")
+    ap.add_argument("--dry-run", action="store_true", help="Detect + print only, no arm.")
+    ap.add_argument("--watch", action="store_true", help="Live Rerun detection preview, no arm.")
+    ap.add_argument("--no-twin", action="store_true", help="Skip the MuJoCo twin window.")
+    ap.add_argument("--port", default="/dev/ttyACM1")
+    args = ap.parse_args()
+
+    if args.selftest:
+        sys.exit(selftest())
+    if args.watch:
+        watch()
+        return
+
+    print("Localizing ball...")
+    p_base, ball = localize_base()
+    if p_base is None:
+        sys.exit("Ball not found in the frame — aborting (nothing moved).")
+    print(f"  conf={ball['conf']:.2f}  radius={ball['radius_m'] * 1000:.0f}mm  "
+          f"cam=({1000 * np.asarray(ball['center3d'])}).round mm")
+    print(f"  ball centre, BASE frame = {np.round(p_base * 1000).astype(int)} mm")
+
+    inside = (BALL_X[0] <= p_base[0] <= BALL_X[1] and BALL_Y[0] <= p_base[1] <= BALL_Y[1]
+              and BALL_Z[0] <= p_base[2] <= BALL_Z[1])
+    print(f"  workspace check: {'OK' if inside else 'OUT OF BOUNDS'} "
+          f"(x{BALL_X} y{BALL_Y} z{BALL_Z})")
+    if args.dry_run:
+        return
+    if not inside:
+        sys.exit("Refusing to move to an out-of-bounds target.")
+
+    # IK both waypoints before touching the arm
+    kin = Kin()
+    above, grasp, e_g, tilt, e_a = plan_waypoints(kin, np.asarray(p_base, float))
+    print(f"  IK: grasp_err={e_g * 1000:.1f}mm  tilt={tilt:.0f}deg  "
+          f"approach_short={e_a * 1000:.0f}mm")
+    if e_g > 0.008 or tilt > 70 or e_a > 0.05:
+        sys.exit("IK did not converge well — target out of reach. Aborting.")
+    for w in (above, grasp):
+        w["gripper"] = GRIP_OPEN
+
+    twin = None
+    if not args.no_twin:
+        try:
+            twin = Twin(np.asarray(p_base, float), ball["radius_m"], ball.get("z_table"))
+            twin.set(grasp)                              # preview the planned grasp pose
+            print("  Twin window: planned GRASP pose vs the detected ball — check it straddles.")
+        except Exception as e:
+            print(f"  (twin unavailable: {e!r})")
+
+    if input("Move the arm? [y/N] ").strip().lower() != "y":
+        if twin:
+            twin.close()
+        sys.exit("Aborted (nothing moved).")
+
+    sys.path.insert(0, str(ROOT))
+    from lerobot.robots.so_follower import SOFollower
+    from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
+    from gamepad_utils import graceful_shutdown
+
+    robot = SOFollower(SOFollowerRobotConfig(port=args.port, id="so101", cameras={}))
+    robot.connect()
+    try:
+        cur = read_angles(robot)
+        print("1/6 above ball");  cur = move_to(robot, cur, above, twin=twin)
+        print("2/6 descend");     cur = move_to(robot, cur, grasp, seconds=2.0, twin=twin)
+        print("3/6 close");       cur = close_on_ball(robot, cur, twin=twin)
+        lift = dict(cur); lift.update({k: above[k] for k in ARM_JOINTS})
+        print("4/6 lift");        cur = move_to(robot, cur, lift, seconds=2.0, twin=twin)
+        time.sleep(1.0)
+        down = dict(cur); down.update({k: grasp[k] for k in ARM_JOINTS})
+        print("5/6 put back");    cur = move_to(robot, cur, down, seconds=2.0, twin=twin)
+        rel = dict(cur); rel["gripper"] = GRIP_OPEN
+        print("6/6 release");     cur = move_to(robot, cur, rel, seconds=1.0, twin=twin)
+        cur = move_to(robot, cur, dict(cur, **{k: above[k] for k in ARM_JOINTS}),
+                      seconds=1.5, twin=twin)
+        print("Done — grabbed, lifted, put back.")
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+    except Exception as e:
+        print(f"\nUnexpected error: {e!r}\nLanding the arm safely...")
+    finally:
+        graceful_shutdown(robot)
+        try:
+            robot.disconnect()
+        except Exception:
+            pass
+        if twin:
+            twin.close()
+
+
+if __name__ == "__main__":
+    main()

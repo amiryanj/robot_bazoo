@@ -68,7 +68,7 @@ def fit_table_plane(points, iters=600, thresh=0.006, seed=0):
     # least-squares refit on inliers (centroid + SVD)
     P = points[inl]
     c = P.mean(0)
-    _, _, Vt = np.linalg.svd(P - c)
+    _, _, Vt = np.linalg.svd(P - c, full_matrices=False)   # economy: U is N×3, not N×N
     n = Vt[2]
     d = -n @ c
     return n, d, inl
