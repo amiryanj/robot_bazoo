@@ -270,7 +270,7 @@ def main():
                         print("  Ball reset.")
 
             # ── Joint control ─────────────────────────────────────────────────
-            deltas = get_joint_deltas(joystick, profile)
+            deltas = get_joint_deltas(joystick, profile, dt=1.0 / FPS)
             if not is_neutral(deltas):
                 joint_pos = apply_deltas(joint_pos, deltas)
             set_joint_targets(mj_data, mj_model, joint_pos)

@@ -78,9 +78,14 @@ These are the rules that keep a fresh session from breaking things:
 - **Always pass `--robot.id=so101`** to lerobot CLI commands (loads the calibration).
 - **Don't re-run `lerobot-setup-motors`** (motor IDs 1–6 are assigned) and don't
   recalibrate unless the calibration file is missing — both are already done.
-- **The `P_Coefficient=32` fix is load-bearing — do not revert it.** lerobot's
-  `configure()` originally halved it to 16, which left the arm unable to lift against
-  gravity. The fix lives in `patches/lerobot_local.patch` (see below).
+- **The servo-gain fix in `configure()` is load-bearing — do not revert it.** The
+  patched `so_follower.py` applies per-motor gains from `outputs/tuning/gains.json`
+  on every connect (currently P=32 I=0 **D=200** on shoulder_pan/lift/elbow — tuned
+  2026-06-11 against wrist-IMU ringing; default P=32 I=0 D=32 elsewhere). Stock
+  lerobot wrote P=16, which left the arm unable to lift against gravity. Lives in
+  `patches/lerobot_local.patch` (see below). Note this also means **EEPROM gains are
+  reset from gains.json on every connect** — to keep a tuning result, put it in that
+  file.
 - **Power: 7.4–7.5 V required.** 5 V trips STS3215 under-voltage protection
   (`RxPacketError: Input voltage error`). Tune/test only at correct voltage.
 - **`lerobot/` and `SO-ARM100/` are external git repos** (gitignored here). After a
@@ -90,6 +95,10 @@ These are the rules that keep a fresh session from breaking things:
   torque-off; `shoulder_lift` is the one that drops hardest.
 - **EEPROM wear:** P/I/D are EEPROM registers; `calibrate.py autotune` writes them
   once per trial. A few hundred trials is fine; don't loop for hours.
+- **One process per serial port.** Two scripts on `/dev/ttyACM1` (e.g. `station.py`
+  twice, or a background test + a user run) interleave packets and both fail with
+  `TxRxResult: Incorrect status packet!` / `no status packet`. Seeing those errors →
+  first check `pgrep -af station.py` before suspecting hardware.
 
 ## Environment
 
@@ -143,6 +152,10 @@ SmolVLA training+inference; big-VLA (7B) training needs the cloud.
   optionally cameras + a MuJoCo twin. Gamepad mapping unchanged: L-stick = pan/lift,
   R-stick = elbow/wrist-roll, L/R = wrist-flex, ZL/ZR = gripper. Also takes typed
   commands (`<joint> <deg>`, `all <deg>`, `hold`, `torque off/on`, `q`).
+  Teleop ticks at **50 Hz** (`CMD_RATE_HZ`) decoupled from telemetry polling
+  (`--rate`, 10 Hz); stick mapping is expo (`v∝s·|s|`) with `JOINT_SPEED` in
+  **deg/s** (pan 60, lift/elbow 50 — user-validated 2026-06-11: fast + smooth,
+  stops clean with D=64). Active servo gains are logged in each run's `summary.txt`.
   - Joystick is **hot-pluggable** — start with none, plug in mid-run, unplug and the
     arm holds (pygame runs headless via `SDL_VIDEODRIVER=dummy`, input only).
   - Flags: `--observe` (read-only, no teleop), `--health` (startup register report),
@@ -197,8 +210,14 @@ SmolVLA training+inference; big-VLA (7B) training needs the cloud.
 - `servo_tuning.py` — library: Lock-aware PID read/write (keeps torque on),
   `Acceleration` profiling, high-rate single-joint capture, trajectory generators
   (step / trapezoid / sine / chirp), step metrics, 2nd-order fit, FRF/resonance, cost.
+  Also `ImuRecorder` (background wrist-IMU capture on the same `perf_counter` clock
+  as `run_trajectory`) + `vibration_metrics` (gravity-removed wrist vibration →
+  after-stop decay time, residual RMS, ring frequency) + `vibration_cost`.
 - `calibrate.py` — CLI: `step` / `chirp` / `profile` / `autotune` (Optuna closed-loop
   PID search). `--sim` runs the whole loop on the MuJoCo twin; `--rate` caps samples.
+  On hardware it records the wrist IMU per capture (opt out with `--no-imu`): `step`
+  prints/plots after-stop ringing (`imu.png`/`imu.csv`), and `autotune`'s cost
+  penalizes measured wrist ringing, not just encoder error.
 - `sim_backend.py` — MuJoCo `SimBus`/`SimRobot` mimicking the Feetech bus, so
   `calibrate.py --sim` can smoke-test tuning with no hardware. Maps P/D → actuator
   kp/kv, I → integral torque, Acceleration → setpoint rate-limit.
@@ -220,18 +239,31 @@ python calibrate.py autotune --joint shoulder_pan --size 25 --trials 40
 python calibrate.py chirp    --joint shoulder_pan --f0 0.5 --f1 15
 ```
 Outputs (CSV + PNG) land in `outputs/tuning/<timestamp>_*/`. Restore factory gains with
-`--p 32 --i 0 --d 32`. The wrist IMU (now mounted) gives true resonance ID / input
-shaping beyond the encoder-only chirp ceiling (~20–30 Hz); capture motor+IMU together
-with `station.py` and merge the two CSVs on `time_s`. `calibrate.py` does not yet read
-the IMU.
+`--p 32 --i 0 --d 32` (one run only — the next connect reapplies `gains.json`).
+`calibrate.py` reads the IMU directly during every hardware capture; for resonance ID
+beyond the encoder ceiling you can still merge `station.py`'s synced CSVs on `time_s`.
+
+**Real-arm findings (2026-06-11, 7.8 V):** the after-stop oscillation seen in teleop is
+an **underdamped servo loop** (factory D=32): 5–11 % overshoot and a 1–2 s wrist
+ring-down at ~3–6 Hz on the big joints, worst on gravity-loaded `shoulder_lift`/
+`elbow_flex`. Fix: **P=32 I=0 D=200** (now in `gains.json`) → overshoot ≈0 %, ring-down
+dies into the noise floor, elbow micro-hunting gone (residual 0.45→0.20 m/s²), rise only
+~35–90 ms slower. Two non-fixes learned: **I>0 causes limit-cycle hunting** (integrator
+vs stiction — Optuna picks it to please steady-state cost; keep I=0), and there is an
+irreducible **~0.5 m/s² holding buzz** at gravity-loaded poses (torque dither, present
+with zero motion at any gains — don't chase it with PID).
 
 ## Local lerobot patches
 
 `patches/lerobot_local.patch` holds two edits to the gitignored `lerobot/` install:
-1. `so_follower.py`: `P_Coefficient=32` (lift torque) + per-camera fault-tolerant connect.
+1. `so_follower.py`: per-motor P/I/D loaded from `outputs/tuning/gains.json` on connect
+   (default P=32 I=0 D=32 — P must stay 32 for lift torque) + per-camera fault-tolerant
+   connect.
 2. `camera_realsense.py`: read-loop `stop_event` fix.
 
 Reapply after a fresh lerobot clone: `git -C lerobot apply ../patches/lerobot_local.patch`.
+`gains.json` sits under the gitignored `outputs/` — it is force-added (`git add -f`)
+so it survives a re-clone; edit it (not EEPROM) to change standing gains.
 
 ## Status & TODO
 
@@ -248,12 +280,25 @@ Reapply after a fresh lerobot clone: `git -C lerobot apply ../patches/lerobot_lo
       offset solver. Live run 2026-06-11: **4.6 mm RMS over 16 poses** →
       `outputs/calib/handeye.json` (cam 471 mm above base, looking straight down).
       See `vision/HANDEYE.md` for how/why.
-- [ ] **Run tuning on the real arm** (not done yet — start shoulder_pan at 7.5 V)
-- [ ] Use synced IMU + motor logs to calibrate servo coefficients / ID resonance
+- [x] **Real-arm tuning done (2026-06-11)** — `calibrate.py` now records the wrist IMU
+      per capture; diagnosed the after-stop oscillation (underdamped loop + gravity)
+      and fixed it with **D=200** on pan/lift/elbow, persisted via `gains.json`
+      (applied on every connect by the patched `configure()`). See Tuning workflow.
+- [ ] Resonance ID / input shaping from chirp + IMU (encoder-only ceiling ~20–30 Hz)
 - [ ] Revisit `graceful_shutdown` — Ctrl-C rest-pose move was abrupt/noisy (tune
       `REST_POSE` / duration, maybe slower easing)
 - [ ] Realsense + wrist cam USB bandwidth (works alone, stalls together)
 - [ ] Collect sim episodes → cloud ACT training (plan exists)
+
+Refactor backlog (small, not urgent — the layering is mostly right: one IMU parser,
+one gamepad layer, one gains source, one tuning library):
+- [ ] Shared constants (`PORT`, output roots) are duplicated in `station.py` /
+      `calibrate.py` — hoist into one small config module / settings file
+- [ ] Two IMU sinks duplicate the align-to-host-clock logic (`station.imu_loop`,
+      `servo_tuning.ImuRecorder`) — unify into one recorder with pluggable sinks
+- [ ] `gains.json`: add named per-mode profiles (teleop / point-to-point / VLA)
+      when the scripted pick-place needs them; trapezoid profile for auto-mode
+      moves lives in `servo_tuning.trapezoid_ref` (already written, unused)
 
 ## Robot config (cameras)
 

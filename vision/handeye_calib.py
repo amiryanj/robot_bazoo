@@ -349,7 +349,7 @@ def main():
                     joystick = None
 
             if joystick is not None:
-                deltas = smoother(get_joint_deltas(joystick, profile))
+                deltas = smoother(get_joint_deltas(joystick, profile, dt=0.03))
                 goal = apply_deltas(goal, deltas)
                 robot.send_action({f"{n}.pos": goal[n] for n in MOTOR_NAMES})
 

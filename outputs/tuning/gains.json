@@ -1,0 +1,5 @@
+{
+  "shoulder_pan":  {"P": 32, "I": 0, "D": 64},
+  "shoulder_lift": {"P": 32, "I": 0, "D": 64},
+  "elbow_flex":    {"P": 32, "I": 0, "D": 64}
+}

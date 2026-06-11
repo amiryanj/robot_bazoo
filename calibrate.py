@@ -50,7 +50,7 @@ from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
 import servo_tuning as st
 from gamepad_utils import JOINT_LIMITS, graceful_shutdown
 
-PORT = "/dev/ttyACM0"
+PORT = "/dev/ttyACM1"   # CH343 arm controller (the ESP32-C3 IMU owns ttyACM0)
 ROBOT_ID = "so101"
 OUT_ROOT = Path("/home/javad/workspace/lerobot_all/outputs/tuning")
 
@@ -111,6 +111,29 @@ def save_run_csv(path: Path, data: dict) -> None:
             w.writerow([f"{x:.4f}" for x in row])
 
 
+def vib_for(imu, data: dict, record_s: float, rise_time_s: float = float("nan")) -> dict | None:
+    """Extract this capture's IMU window and score the after-stop ringing.
+    The tail window starts after the move transient (3× rise time, min 0.3 s)."""
+    if imu is None or "t0_perf" not in data:
+        return None
+    raw = imu.extract(data["t0_perf"], record_s)
+    if raw is None:
+        return None
+    tail = max(0.3, 3.0 * rise_time_s) if rise_time_s == rise_time_s else 0.3
+    vm = st.vibration_metrics(raw, tail_start_s=tail)
+    if vm is not None:
+        vm["raw"] = raw
+    return vm
+
+
+def save_imu_csv(path: Path, raw: dict) -> None:
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["t", "ax_ms2", "ay_ms2", "az_ms2"])
+        for row in zip(raw["t"], raw["ax"], raw["ay"], raw["az"]):
+            w.writerow([f"{x:.5f}" for x in row])
+
+
 def print_metrics(m: dict, fit=None) -> None:
     print("  ── Step metrics ─────────────────────────")
     print(f"    rise time        : {m['rise_time_s']*1000:7.1f} ms")
@@ -121,6 +144,14 @@ def print_metrics(m: dict, fit=None) -> None:
     if fit and fit[0] is not None:
         wn, zeta = fit[0], fit[1]
         print(f"    fitted model     : wn={wn:6.1f} rad/s ({wn/(2*np.pi):4.1f} Hz)  zeta={zeta:4.2f}")
+
+
+def print_vib(vm: dict) -> None:
+    print("  ── Wrist IMU (after-stop ringing) ───────")
+    print(f"    decay time       : {vm['decay_time_s']*1000:7.0f} ms  (wrist stopped shaking)")
+    print(f"    residual RMS     : {vm['residual_rms_ms2']:7.3f} m/s²  (last 1 s — hunting if high)")
+    print(f"    ring frequency   : {vm['ring_freq_hz']:7.1f} Hz")
+    print(f"    peak accel       : {vm['vib_peak_ms2']:7.2f} m/s²")
 
 
 # ── Plotting ─────────────────────────────────────────────────────────────────
@@ -147,6 +178,29 @@ def plot_overlay(runs: list, title: str, path: Path) -> None:
         ax.plot(d["t"], d["pos"], "-", lw=1.6, color=f"C{i}", label=label)
     ax.set_xlabel("time (s)"); ax.set_ylabel("position (deg)")
     ax.set_title(title); ax.legend(loc="best"); ax.grid(alpha=0.3)
+    fig.tight_layout(); fig.savefig(path, dpi=110); plt.close(fig)
+
+
+def plot_vibration(vm: dict, data: dict, title: str, path: Path) -> None:
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(9, 7))
+    ax1.plot(vm["t"], vm["v"], color="C0", lw=0.6, alpha=0.8, label="wrist vibration |a| (gravity removed)")
+    ax1.plot(vm["t"], vm["rms_roll"], color="C1", lw=1.5, label="50 ms rolling RMS")
+    ax1.axhline(vm["decay_thresh_ms2"], color="C3", ls=":", lw=1.0, label="decay threshold")
+    ax1.axvline(vm["tail_start_s"], color="gray", ls="--", lw=0.8)
+    ax1.axvline(vm["decay_time_s"], color="C3", ls="--", lw=1.2,
+                label=f"decay {vm['decay_time_s']*1000:.0f} ms")
+    twin = ax1.twinx()
+    twin.plot(data["t"], data["pos"], color="C2", alpha=0.5, lw=1.2)
+    twin.set_ylabel("joint position (deg)", color="C2")
+    ax1.set_xlabel("time (s)"); ax1.set_ylabel("accel (m/s²)")
+    ax1.set_title(title); ax1.legend(loc="best", fontsize=8); ax1.grid(alpha=0.3)
+    ax2.semilogy(vm["f_psd"], vm["psd"], color="C0")
+    if vm["ring_freq_hz"] == vm["ring_freq_hz"]:
+        ax2.axvline(vm["ring_freq_hz"], color="C3", ls="--",
+                    label=f"ring ≈ {vm['ring_freq_hz']:.1f} Hz")
+        ax2.legend(loc="best")
+    ax2.set_xlabel("frequency (Hz)"); ax2.set_ylabel("PSD (after-stop window)")
+    ax2.grid(alpha=0.3, which="both")
     fig.tight_layout(); fig.savefig(path, dpi=110); plt.close(fig)
 
 
@@ -177,7 +231,7 @@ def resolve_step_targets(bus, motor, args):
     return clamp_to_limits(motor, start), clamp_to_limits(motor, target)
 
 
-def cmd_step(robot, args):
+def cmd_step(robot, args, imu=None):
     bus = robot.bus
     motor = args.joint
     check_voltage(bus, motor)
@@ -191,15 +245,21 @@ def cmd_step(robot, args):
     metrics = st.step_metrics(data["t"], data["goal"], data["pos"])
     fit = st.fit_second_order(data["t"], data["pos"], target)
     print_metrics(metrics, fit)
+    vm = vib_for(imu, data, args.record, metrics["rise_time_s"])
+    if vm:
+        print_vib(vm)
 
     d = out_dir(f"step_{motor}")
     save_run_csv(d / "step.csv", data)
     title = f"{motor} step {start:.0f}->{target:.0f}°  P={pid['P']} I={pid['I']} D={pid['D']}"
     plot_step(data, metrics, fit, title, d / "step.png")
+    if vm:
+        save_imu_csv(d / "imu.csv", vm["raw"])
+        plot_vibration(vm, data, title + "  (wrist IMU)", d / "imu.png")
     print(f"  Saved: {d}")
 
 
-def cmd_chirp(robot, args):
+def cmd_chirp(robot, args, imu=None):
     bus = robot.bus
     motor = args.joint
     check_voltage(bus, motor)
@@ -224,7 +284,7 @@ def cmd_chirp(robot, args):
     print(f"  Saved: {d}")
 
 
-def cmd_profile(robot, args):
+def cmd_profile(robot, args, imu=None):
     bus = robot.bus
     motor = args.joint
     check_voltage(bus, motor)
@@ -241,7 +301,9 @@ def cmd_profile(robot, args):
         data = st.capture_step(bus, motor, start, target, record_s=args.record,
                                pre_settle_s=args.settle, max_rate_hz=args.rate)
         m = st.step_metrics(data["t"], data["goal"], data["pos"])
-        print(f"  {label}: overshoot {m['overshoot_pct']:.1f}%  settling {m['settling_time_s']*1000:.0f} ms")
+        vm = vib_for(imu, data, args.record, m["rise_time_s"])
+        extra = f"  vib decay {vm['decay_time_s']*1000:.0f} ms  residual {vm['residual_rms_ms2']:.3f} m/s²" if vm else ""
+        print(f"  {label}: overshoot {m['overshoot_pct']:.1f}%  settling {m['settling_time_s']*1000:.0f} ms{extra}")
         runs.append((label, data))
 
     d = out_dir(f"profile_{motor}")
@@ -251,7 +313,7 @@ def cmd_profile(robot, args):
     print(f"  Saved: {d}")
 
 
-def cmd_autotune(robot, args):
+def cmd_autotune(robot, args, imu=None):
     import optuna
     optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -264,33 +326,41 @@ def cmd_autotune(robot, args):
     start, target = resolve_step_targets(bus, motor, args)
     print(f"  Auto-tuning '{motor}'  step {start:.1f}->{target:.1f}°  trials={args.trials}")
     print(f"  Search: P∈[{args.p_min},{args.p_max}] I∈[{args.i_min},{args.i_max}] D∈[{args.d_min},{args.d_max}]")
+    if imu:
+        print("  Cost includes wrist-IMU after-stop ringing (ring RMS + decay time).")
 
     baseline_gains = st.get_pid(bus, motor)
     print(f"  Baseline gains: {baseline_gains}")
 
-    def evaluate(P, I, D) -> tuple[float, dict, dict]:
+    def evaluate(P, I, D) -> tuple[float, dict, dict | None, dict]:
         try:
             st.set_pid(bus, motor, P=P, I=I, D=D, torque_off=args.torque_off)
             data = st.capture_step(bus, motor, start, target,
                                    record_s=args.record, pre_settle_s=args.settle, max_rate_hz=args.rate)
             m = st.step_metrics(data["t"], data["goal"], data["pos"])
-            return st.step_cost(m), m, data
+            vm = vib_for(imu, data, args.record, m["rise_time_s"])
+            return st.step_cost(m) + st.vibration_cost(vm), m, vm, data
         except Exception as e:
             print(f"    trial error ({e}) — penalising")
-            return 1e6, {}, {}
+            return 1e6, {}, None, {}
 
     # Baseline + factory as a first reference point.
-    base_cost, base_m, base_data = evaluate(**baseline_gains)
+    base_cost, base_m, base_vm, base_data = evaluate(**baseline_gains)
     print(f"  Baseline cost: {base_cost:.1f}")
+    if base_vm:
+        print(f"  Baseline vib: decay {base_vm['decay_time_s']*1000:.0f} ms  residual {base_vm['residual_rms_ms2']:.3f} m/s²")
 
     def objective(trial):
         P = trial.suggest_int("P", args.p_min, args.p_max)
         I = trial.suggest_int("I", args.i_min, args.i_max)
         D = trial.suggest_int("D", args.d_min, args.d_max)
-        cost, m, _ = evaluate(P, I, D)
+        cost, m, vm, _ = evaluate(P, I, D)
         if m:
             trial.set_user_attr("overshoot_pct", round(m["overshoot_pct"], 1))
             trial.set_user_attr("settling_ms", round(m["settling_time_s"] * 1000))
+        if vm:
+            trial.set_user_attr("vib_decay_ms", round(vm["decay_time_s"] * 1000))
+            trial.set_user_attr("residual_rms_ms2", round(vm["residual_rms_ms2"], 3))
         return cost
 
     study = optuna.create_study(direction="minimize",
@@ -301,11 +371,13 @@ def cmd_autotune(robot, args):
     study.optimize(objective, n_trials=args.trials, show_progress_bar=False)
 
     best = study.best_params
-    best_cost, best_m, best_data = evaluate(**best)
+    best_cost, best_m, best_vm, best_data = evaluate(**best)
     print("\n  ── Result ───────────────────────────────")
     print(f"    best gains : P={best['P']} I={best['I']} D={best['D']}")
     print(f"    best cost  : {best_cost:.1f}   (baseline {base_cost:.1f})")
     print_metrics(best_m)
+    if best_vm:
+        print_vib(best_vm)
 
     # Leave the best gains active on the servo (persists in EEPROM).
     st.set_pid(bus, motor, P=best["P"], I=best["I"], D=best["D"], torque_off=args.torque_off)
@@ -316,14 +388,20 @@ def cmd_autotune(robot, args):
     if base_data and best_data:
         plot_overlay([("baseline", base_data), ("tuned", best_data)],
                      f"{motor} step response: baseline vs tuned", d / "before_after.png")
+    # before/after wrist-IMU plots
+    if base_vm and best_vm:
+        plot_vibration(base_vm, base_data, f"{motor} baseline (wrist IMU)", d / "imu_baseline.png")
+        plot_vibration(best_vm, best_data, f"{motor} tuned (wrist IMU)", d / "imu_tuned.png")
     # trial history CSV
     with open(d / "trials.csv", "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["number", "P", "I", "D", "cost", "overshoot_pct", "settling_ms"])
+        w.writerow(["number", "P", "I", "D", "cost", "overshoot_pct", "settling_ms",
+                    "vib_decay_ms", "residual_rms_ms2"])
         for t in study.trials:
             w.writerow([t.number, t.params.get("P"), t.params.get("I"), t.params.get("D"),
                         f"{t.value:.2f}" if t.value is not None else "",
-                        t.user_attrs.get("overshoot_pct", ""), t.user_attrs.get("settling_ms", "")])
+                        t.user_attrs.get("overshoot_pct", ""), t.user_attrs.get("settling_ms", ""),
+                        t.user_attrs.get("vib_decay_ms", ""), t.user_attrs.get("residual_rms_ms2", "")])
     print(f"  Saved: {d}")
 
 
@@ -349,6 +427,8 @@ def build_parser():
         sp.add_argument("--settle", type=float, default=1.0, help="pre-step settle time (s)")
         sp.add_argument("--rate", type=float, default=None,
                         help="cap sample rate (Hz); default uncapped on hardware, 250 in --sim")
+        sp.add_argument("--no-imu", action="store_true", dest="no_imu",
+                        help="skip the wrist-IMU recorder (vibration metrics)")
 
     sp = sub.add_parser("step", help="step response + metrics"); common(sp)
     sp.add_argument("--size", type=float, default=20.0, help="step magnitude from current pos (deg)")
@@ -395,12 +475,19 @@ def main():
         robot.connect()
     else:
         robot = connect(args.port, args.robot_id)
+    imu = None
+    if not args.sim and not args.no_imu:
+        imu = st.ImuRecorder()
+        if not imu.start():
+            imu = None
     try:
         hold_all(robot)
-        HANDLERS[args.cmd](robot, args)
+        HANDLERS[args.cmd](robot, args, imu)
     except KeyboardInterrupt:
         print("\nInterrupted.")
     finally:
+        if imu:
+            imu.stop()
         graceful_shutdown(robot)
         try:
             robot.disconnect()

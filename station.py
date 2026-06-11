@@ -56,6 +56,7 @@ from gamepad_utils import (
 )
 
 PORT     = "/dev/ttyACM1"  # CH343 arm controller (ESP32-C3 IMU takes ttyACM0)
+CMD_RATE_HZ = 50           # teleop command tick; telemetry still polls at --rate
 ROBOT_ID = "so101"
 LOG_DIR  = Path("/home/javad/workspace/lerobot_all/outputs/logs")
 SCENE_XML = "/home/javad/workspace/lerobot_all/SO-ARM100/Simulation/SO101/scene.xml"
@@ -415,6 +416,15 @@ def main():
         csv_path = log_dir / "station.csv"
         summary_f = open(log_dir / "summary.txt", "w")
         summary_f.write(f"Run: {datetime.now().isoformat()}  Port: {args.port}\n\n")
+        # Active servo gains, so every log is self-describing (gains.json may change).
+        summary_f.write("Servo gains (P/I/D, Acceleration):\n")
+        for name in MOTOR_NAMES:
+            p = int(bus.read("P_Coefficient", name, normalize=False))
+            i = int(bus.read("I_Coefficient", name, normalize=False))
+            dd = int(bus.read("D_Coefficient", name, normalize=False))
+            acc = int(bus.read("Acceleration", name, normalize=False))
+            summary_f.write(f"  {name:14s} P={p:3d} I={i:3d} D={dd:3d}  Accel={acc}\n")
+        summary_f.write("\n")
         print(f"Logging to: {log_dir}")
 
     # ── Health report + fixes ───────────────────────────────────────────────────
@@ -479,7 +489,7 @@ def main():
     # ── Joystick (headless) ─────────────────────────────────────────────────────
     pygame.init()
     jm = JoystickManager()
-    smoother = DeltaSmoother(alpha=0.45)
+    smoother = DeltaSmoother(alpha=0.15)   # per-tick EMA; τ≈0.13 s at the 50 Hz command tick
 
     # ── Twin (lazy import) ──────────────────────────────────────────────────────
     twin = mj_model = mj_data = None
@@ -498,11 +508,13 @@ def main():
         threading.Thread(target=_input_thread, args=(cmd_queue,), daemon=True).start()
 
     mode = "observe" if args.observe else "teleop"
-    print(f"\nStation running ({mode}) at {args.rate} Hz. "
+    print(f"\nStation running ({mode}): commands at {CMD_RATE_HZ} Hz, telemetry at {args.rate} Hz. "
           + ("Type 'help' for commands. " if not args.observe else "")
           + "Ctrl-C to stop.\n")
 
-    dt = 1.0 / args.rate
+    dt = 1.0 / CMD_RATE_HZ
+    poll_dt = 1.0 / args.rate
+    last_poll = -1e9
     prev_loop = None
     error_counts = {n: 0 for n in MOTOR_NAMES}
     writer = None
@@ -535,10 +547,16 @@ def main():
 
             # ── joystick → action ────────────────────────────────────────────────
             if jm.connected and not args.observe:
-                deltas = smoother(get_joint_deltas(jm.joystick, jm.profile))
+                deltas = smoother(get_joint_deltas(jm.joystick, jm.profile, dt))
                 if not is_neutral(deltas):
                     goal_pos = apply_deltas(goal_pos, deltas)
                     robot.send_action({f"{n}.pos": goal_pos[n] for n in MOTOR_NAMES})
+
+            # ── telemetry below runs at --rate; fast ticks stop here ─────────────
+            if loop_start - last_poll < poll_dt:
+                time.sleep(max(dt - (time.perf_counter() - loop_start), 0.0))
+                continue
+            last_poll = loop_start
 
             # ── read motors → Rerun + CSV ────────────────────────────────────────
             rr.set_time("time", duration=t_rel)

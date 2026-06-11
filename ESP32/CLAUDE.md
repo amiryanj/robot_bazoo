@@ -176,6 +176,7 @@ logs it to the shared Rerun timeline + `imu.csv`, time-synced with the motor str
 
 - [x] Switch to ESP32-C3 Super Mini for final robot hardware (mounted on `wrist_roll`)
 - [x] Integrate ADXL345 data alongside motor logging (`station.py`, synced CSVs)
-- [ ] Use the synced motor+IMU logs to calibrate servo coefficients / ID resonance
+- [x] Use the IMU to calibrate servo coefficients (`../calibrate.py` records it live
+      per capture; tuned D=200 on the big joints 2026-06-11 — see root CLAUDE.md)
 - [ ] Add gyroscope (ADXL345 is accelerometer only — consider ICM-42688 for full IMU)
 - [ ] BLE remote control from phone (nRF Connect app for testing)

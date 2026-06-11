@@ -37,7 +37,10 @@ calibration file). Time is in seconds.
 
 from __future__ import annotations
 
+import threading
 import time
+from collections import deque
+
 import numpy as np
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -236,6 +239,7 @@ def run_trajectory(bus, motor: str, ref_fn, duration_s: float,
     min_dt = (1.0 / max_rate_hz) if max_rate_hz else 0.0
 
     t0 = time.perf_counter()
+    t0_perf = t0                       # exposed so an ImuRecorder can align its window
     while True:
         t = time.perf_counter() - t0
         if t > duration_s:
@@ -252,7 +256,8 @@ def run_trajectory(bus, motor: str, ref_fn, duration_s: float,
         if min_dt:
             time.sleep(max(min_dt - (time.perf_counter() - t0 - t), 0.0))
 
-    out = {"t": np.asarray(t_log), "goal": np.asarray(goal_log), "pos": np.asarray(pos_log)}
+    out = {"t": np.asarray(t_log), "goal": np.asarray(goal_log), "pos": np.asarray(pos_log),
+           "t0_perf": t0_perf}
     if len(out["t"]) > 1:
         out["fs_hz"] = float(1.0 / np.median(np.diff(out["t"])))
     else:
@@ -403,6 +408,148 @@ def frequency_response(t: np.ndarray, goal: np.ndarray, pos: np.ndarray,
 
     return {"freq_hz": f, "mag_db": mag_db, "phase_deg": phase_deg,
             "coherence": coh, "resonance_hz": res_hz, "fs_hz": fs}
+
+
+# ── Wrist-IMU capture & vibration analysis ───────────────────────────────────
+
+class ImuRecorder:
+    """
+    Best-effort background recorder for the wrist ADXL345 (via ESP32/imu_serial.py).
+
+    start() opens the serial stream in a daemon thread and buffers samples with
+    timestamps on the same time.perf_counter() clock that run_trajectory uses, so
+    extract(data["t0_perf"], record_s) returns exactly the window of one capture.
+    One recorder serves a whole session (autotune runs many captures) — the serial
+    port is opened once, not per trial.
+    """
+
+    def __init__(self, buffer_s: float = 120.0):
+        self._buf = deque(maxlen=int(buffer_s * 800))    # 800 Hz firmware ODR
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self) -> bool:
+        import os
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "ESP32"))
+        try:
+            from imu_serial import stream_samples, SCALE
+            gen = stream_samples()
+        except Exception as e:
+            print(f"  IMU off ({e}) — vibration metrics disabled.")
+            return False
+        self._thread = threading.Thread(target=self._loop, args=(gen, SCALE), daemon=True)
+        self._thread.start()
+        return True
+
+    def _loop(self, gen, scale):
+        first_us = None
+        base = 0.0
+        try:
+            for (t_us, x, y, z) in gen:
+                if self._stop.is_set():
+                    break
+                if first_us is None:
+                    first_us = t_us
+                    base = time.perf_counter()   # ±one firmware batch (~31 ms)
+                self._buf.append((base + (t_us - first_us) / 1e6,
+                                  x * scale, y * scale, z * scale))
+        finally:
+            gen.close()
+
+    def extract(self, t0_perf: float, duration_s: float, pre_s: float = 0.5) -> dict | None:
+        """Samples in [t0_perf - pre_s, t0_perf + duration_s]; t relative to t0_perf
+        (so t<0 is the pre-move baseline). None if the IMU isn't streaming."""
+        if self._thread is None:
+            return None
+        time.sleep(0.1)                          # let the last firmware batch arrive
+        rows = [r for r in list(self._buf)
+                if t0_perf - pre_s <= r[0] <= t0_perf + duration_s]
+        if len(rows) < 64:
+            return None
+        a = np.asarray(rows)
+        return {"t": a[:, 0] - t0_perf, "ax": a[:, 1], "ay": a[:, 2], "az": a[:, 3]}
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=2.5)
+
+
+def vibration_metrics(imu: dict, tail_start_s: float = 0.3,
+                      decay_thresh_ms2: float = 0.2) -> dict | None:
+    """
+    After-stop ringing metrics from a wrist-accel window around one move.
+
+    Gravity — including its slow reorientation while the joint moves — is removed
+    by subtracting a ~0.25 s moving average per axis; the residual magnitude is the
+    vibration signal v(t). Metrics:
+      vib_peak_ms2     : peak |v| (dominated by the move transient itself)
+      decay_time_s     : last time the 50 ms rolling RMS exceeds decay_thresh_ms2 —
+                         when the wrist actually stopped shaking. ≈ record end means
+                         it never stopped.
+      residual_rms_ms2 : RMS of v over the last 1 s of the record — persistent
+                         hunting/limit-cycle indicator (should be ≈ sensor noise).
+      ring_freq_hz     : dominant frequency for t >= tail_start_s (Welch, >= 1 Hz) —
+                         the resonance the ring-down oscillates at.
+    Also returns the arrays (t, v, rms_roll, f_psd, psd) for plotting.
+    """
+    from scipy import signal
+    t = np.asarray(imu["t"], float)
+    if len(t) < 64:
+        return None
+    fs = 1.0 / float(np.median(np.diff(t)))
+
+    win = max(3, int(round(0.25 * fs)) | 1)
+    kernel = np.ones(win) / win
+    res = []
+    for k in ("ax", "ay", "az"):
+        a = np.asarray(imu[k], float)
+        trend = np.convolve(a, kernel, mode="same")
+        res.append(a - trend)
+    # The moving average is biased inside half a window of either edge — trim it.
+    half = win // 2
+    t = t[half:-half]
+    res = [r[half:-half] for r in res]
+    v = np.sqrt(res[0] ** 2 + res[1] ** 2 + res[2] ** 2)
+    if len(t) < 64:
+        return None
+
+    rwin = max(3, int(round(0.05 * fs)))
+    rms_roll = np.sqrt(np.convolve(v ** 2, np.ones(rwin) / rwin, mode="same"))
+
+    tail = t >= min(tail_start_s, t[-1] - 0.25)
+    seg = v[tail] - np.mean(v[tail])
+    nper = min(len(seg), 512)
+    f_psd, psd = signal.welch(seg, fs=fs, nperseg=nper)
+    band = f_psd >= 1.0
+    ring_freq = float(f_psd[band][np.argmax(psd[band])]) if np.any(band) else float("nan")
+
+    last = t >= t[-1] - 1.0          # tail_start_s can exceed the record on slow moves
+    residual_rms = float(np.sqrt(np.mean(v[last] ** 2)))
+
+    above = np.where((t >= 0) & (rms_roll > decay_thresh_ms2))[0]
+    decay = float(t[above[-1]]) if len(above) else 0.0
+
+    return {"vib_peak_ms2": float(np.max(v)), "residual_rms_ms2": residual_rms,
+            "ring_freq_hz": ring_freq, "decay_time_s": decay,
+            "fs_hz": fs, "tail_start_s": float(tail_start_s),
+            "decay_thresh_ms2": float(decay_thresh_ms2),
+            "t": t, "v": v, "rms_roll": rms_roll, "f_psd": f_psd, "psd": psd}
+
+
+VIB_WEIGHTS = {
+    "residual": 50.0,    # per m/s² of persistent after-stop vibration (hunting)
+    "decay": 10.0,       # per second of ring-down
+}
+
+
+def vibration_cost(vm: dict | None, weights: dict | None = None) -> float:
+    """Additive cost term from vibration_metrics (0 when no IMU data)."""
+    if not vm:
+        return 0.0
+    w = {**VIB_WEIGHTS, **(weights or {})}
+    return w["residual"] * vm["residual_rms_ms2"] + w["decay"] * max(0.0, vm["decay_time_s"])
 
 
 # ── Auto-tune cost ───────────────────────────────────────────────────────────

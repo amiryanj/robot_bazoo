@@ -14,13 +14,13 @@ MOTOR_NAMES = [
     "wrist_flex", "wrist_roll", "gripper",
 ]
 
-JOINT_SPEED = {
-    "shoulder_pan":  2.5,
-    "shoulder_lift": 2.0,
-    "elbow_flex":    2.0,
-    "wrist_flex":    1.5,
-    "wrist_roll":    3.0,
-    "gripper":       1.5,
+JOINT_SPEED = {           # max speed at full stick, deg/s (gripper: units/s)
+    "shoulder_pan":  60.0,
+    "shoulder_lift": 50.0,
+    "elbow_flex":    50.0,
+    "wrist_flex":    35.0,
+    "wrist_roll":    90.0,
+    "gripper":       35.0,
 }
 
 JOINT_LIMITS = {
@@ -72,10 +72,14 @@ def detect_profile(joystick) -> dict:
 
 # ── Joint velocity helpers ─────────────────────────────────────────────────────
 
-def get_joint_deltas(joystick, profile: dict) -> dict:
+def get_joint_deltas(joystick, profile: dict, dt: float) -> dict:
+    """Per-tick goal increments: expo stick × JOINT_SPEED (deg/s) × dt (tick length).
+    dt is required — every caller states its own tick so speeds stay in deg/s."""
     def axis(i):
         v = joystick.get_axis(i)
-        return v if abs(v) > DEADZONE else 0.0
+        if abs(v) <= DEADZONE:
+            return 0.0
+        return v * abs(v)       # expo: fine control near centre, full speed at the edge
 
     def btn(i):
         try:    return joystick.get_button(i)
@@ -85,12 +89,12 @@ def get_joint_deltas(joystick, profile: dict) -> dict:
     rx = axis(2); ry = axis(3)
     sh = profile["shoulder"]
     return {
-        "shoulder_pan":  -lx * JOINT_SPEED["shoulder_pan"],
-        "shoulder_lift":  ly * JOINT_SPEED["shoulder_lift"],
-        "elbow_flex":    -ry * JOINT_SPEED["elbow_flex"],
-        "wrist_roll":     rx * JOINT_SPEED["wrist_roll"],
-        "wrist_flex":    (btn(sh["L"]) - btn(sh["R"])) * JOINT_SPEED["wrist_flex"],
-        "gripper":       (btn(sh["ZL"]) - btn(sh["ZR"])) * JOINT_SPEED["gripper"],
+        "shoulder_pan":  -lx * JOINT_SPEED["shoulder_pan"] * dt,
+        "shoulder_lift":  ly * JOINT_SPEED["shoulder_lift"] * dt,
+        "elbow_flex":    -ry * JOINT_SPEED["elbow_flex"] * dt,
+        "wrist_roll":     rx * JOINT_SPEED["wrist_roll"] * dt,
+        "wrist_flex":    (btn(sh["L"]) - btn(sh["R"])) * JOINT_SPEED["wrist_flex"] * dt,
+        "gripper":       (btn(sh["ZL"]) - btn(sh["ZR"])) * JOINT_SPEED["gripper"] * dt,
     }
 
 
