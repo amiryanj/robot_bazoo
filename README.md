@@ -13,6 +13,74 @@ data collection, and a controller-tuning toolkit for the Feetech STS3215 servos.
 - Wrist IMU: ADXL345 on an ESP32-C3, mounted on `wrist_roll`, 800 Hz (see [ESP32/](ESP32/))
 - Optional: Realsense D455 + wrist webcam, a Switch Pro controller
 
+## Architecture
+
+### Hardware / control stack
+
+The PID loops run **onboard each servo** (the laptop is never inside them) — host scripts
+stream goal positions and read telemetry. Gains are not trusted to EEPROM: the patched
+lerobot `configure()` re-applies `outputs/tuning/gains.json` on every connect.
+
+```mermaid
+flowchart LR
+    pad["Switch Pro gamepad"] --> st
+
+    subgraph laptop["Laptop (conda env, Rerun, RTX 3000 Ada)"]
+        st["station.py<br/>50 Hz command tick<br/>10 Hz telemetry poll"]
+        logs["Rerun window +<br/>outputs/logs/ CSVs<br/>(shared time_s clock)"]
+        st --> logs
+    end
+
+    subgraph arm["SO-101 arm  (7.4-7.5 V bench supply)"]
+        servos["6x STS3215 @ 1 Mbaud<br/>onboard PID per servo<br/>(gains.json: P=32 I=0 D=64<br/>on pan/lift/elbow)"]
+        adxl["ADXL345 accelerometer<br/>800 Hz, on wrist_roll"]
+    end
+
+    st <-->|"USB ttyACM1 (CH343)<br/>goals down / pos·load·current up"| servos
+    adxl -->|"I2C 400 kHz, FIFO"| esp["ESP32-C3"]
+    esp -->|"USB ttyACM0<br/>460800 baud binary"| st
+    cams["Realsense D455 (top-down)<br/>+ wrist webcam"] -->|USB| st
+```
+
+### Software stack
+
+One shared layer per concern — one IMU parser, one gamepad layer, one gains source,
+one tuning library — imported by thin entry-point CLIs:
+
+```mermaid
+flowchart TD
+    subgraph entry["Entry points"]
+        station["station.py<br/>teleop cockpit"]
+        calibrate["calibrate.py<br/>step / chirp / profile / autotune"]
+        simc["sim_collect.py<br/>record sim episodes"]
+        he["vision/handeye_calib.py<br/>T_cam-to-base solver"]
+        pb["pick_ball.py (WIP)<br/>scripted pick-and-place"]
+    end
+
+    subgraph shared["Shared libraries"]
+        gp["gamepad_utils.py<br/>stick to deg/s (expo), smoothing,<br/>joint limits, rest-pose shutdown"]
+        stl["servo_tuning.py<br/>PID r/w, trajectories, step/FRF<br/>metrics, ImuRecorder, vibration cost"]
+        imus["ESP32/imu_serial.py<br/>800 Hz binary parser"]
+        vis["vision/ball_yolo.py<br/>YOLO + depth to 3-D point,<br/>fit_table_plane"]
+        sb["sim_backend.py<br/>MuJoCo SimBus / SimRobot"]
+    end
+
+    subgraph extern["External + config"]
+        lr["lerobot 0.4.5 (patched)<br/>SOFollower, cameras"]
+        gj["outputs/tuning/gains.json<br/>single source of servo gains,<br/>applied on every connect"]
+        mj["MuJoCo SO-101 scene<br/>(SO-ARM100, digital twin / FK)"]
+    end
+
+    station --> gp & imus & lr
+    calibrate --> stl & gp & lr & sb
+    simc --> gp & mj
+    he --> gp & lr & mj
+    pb --> vis & lr
+    stl --> imus
+    lr --> gj
+    sb --> mj
+```
+
 ## Setup
 
 ```bash
@@ -21,8 +89,9 @@ git -C lerobot apply ../patches/lerobot_local.patch   # P-gain + camera fixes (s
 ```
 
 `lerobot/` and `SO-ARM100/` are external repos and aren't tracked here — clone them yourself.
-The patch restores `P_Coefficient=32` (so the arm holds against gravity) and makes camera
-connect/read fault-tolerant.
+The patch makes `configure()` apply per-motor gains from `outputs/tuning/gains.json` on every
+connect (default P=32 so the arm holds against gravity) and makes camera connect/read
+fault-tolerant.
 
 ## Scripts
 
@@ -70,17 +139,22 @@ Live worklist; longer status/history lives in [CLAUDE.md](CLAUDE.md).
 - [ ] Auto-record LeRobot dataset in a loop → train **ACT**, then **SmolVLA**.
 - [ ] Fix two-camera USB stall (wrist cam for grasp) or collect top-down-only first.
 
+**Done 2026-06-11 — servo tuning + teleop (see CLAUDE.md for details)**
+- [x] **IMU integrated into `calibrate.py`** — every hardware capture records the wrist
+      IMU; `step`/`profile` report after-stop decay/residual/ring-frequency, `autotune`
+      penalizes measured wrist ringing in its cost. Verified on hardware.
+- [x] **Tuned the big joints** — after-stop oscillation was an underdamped loop
+      (factory D=32): now **P=32 I=0 D=64** on pan/lift/elbow via `gains.json`
+      (applied at every connect). I>0 limit-cycles against stiction — keep I=0.
+      Irreducible ~0.5 m/s² holding buzz at gravity poses = torque dither, not PID.
+- [x] **Teleop overhaul** — 50 Hz command tick decoupled from telemetry polling,
+      `JOINT_SPEED` in deg/s (~2.5× faster), expo stick curve.
+
 **Next (at the bench, arm at 7.5 V)**
 - [ ] Commanded **chirp on elbow_flex** (`calibrate.py` + `station.py` logging) → confirm
       the **~9.6 Hz** structural mode found in teleop (hand-wiggle, not clean yet).
 - [ ] **Wrist pose-sweep** (wave wrist_roll + wrist_flex through full range, rest still) →
       pin the IMU mounting rotation below ~1° (currently 2.9°, see `analyze_run.py`).
-- [ ] **Tune D per joint** against the mode — start big: shoulder_pan, shoulder_lift,
-      elbow_flex; wrist/gripper are easy.
-
-**Calibration infra**
-- [ ] Integrate IMU into `calibrate.py autotune` — add a wrist-vibration cost term
-      (per-trial IMU thread + 9.6 Hz energy). Scaffold ready to write; **verify on hardware**.
 - [ ] Use IMU→link rotation to subtract gravity + rigid-body accel → pure joint oscillation.
 
 **Fixes / cleanup**
