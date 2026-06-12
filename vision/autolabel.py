@@ -41,8 +41,10 @@ def gdino_boxes(det, color_bgr, prompt, thr):
             for b, s in zip(res["boxes"].tolist(), res["scores"].tolist())]
 
 
-def label_frame(det, color):
-    """Return list of (cls, x1,y1,x2,y2)."""
+def label_frame(det, color, gripper_uv=None, gate_px=90):
+    """Return list of (cls, x1,y1,x2,y2). If gripper_uv (the FK-projected gripper
+    pixel) is given, a heart label must sit within gate_px of it — kinematics-backed
+    QC that kills color false-positives (the red clamp incident)."""
     H, W = color.shape[:2]
     out = []
     balls = gdino_boxes(det, color, "basketball.", BALL_THR)
@@ -52,11 +54,30 @@ def label_frame(det, color):
             out.append((0, x1, y1, x2, y2))
     uv, boxes = det.marker_uv(color)                       # hearts + pink gating
     if uv is not None:
+        if gripper_uv is not None and np.hypot(uv[0] - gripper_uv[0],
+                                               uv[1] - gripper_uv[1]) > gate_px:
+            return out                                     # heart far from gripper: junk
         for (x1, y1, x2, y2), conf, px, frac in boxes:
             if ((x1 + x2) // 2, (y1 + y2) // 2) == uv:
                 out.append((1, x1, y1, x2, y2))
                 break
     return out
+
+
+def fk_gripper_uv(joints, K):
+    """Project the FK gripper position into the image via the hand-eye transform."""
+    import json
+    from handeye_calib import make_fk
+    he = json.load(open(Path(__file__).resolve().parent.parent / "outputs/calib/handeye.json"))
+    R_cb, t_cb = np.array(he["R"]), np.array(he["t"])
+    if not hasattr(fk_gripper_uv, "_fk"):
+        fk_gripper_uv._fk = make_fk()
+    _, t_w = fk_gripper_uv._fk(joints)
+    p_cam = R_cb.T @ (t_w - t_cb)                          # base -> camera frame
+    if p_cam[2] <= 0.05:
+        return None
+    return (int(K["fx"] * p_cam[0] / p_cam[2] + K["ppx"]),
+            int(K["fy"] * p_cam[1] / p_cam[2] + K["ppy"]))
 
 
 def main():
@@ -73,7 +94,13 @@ def main():
         if color is None:
             continue
         H, W = color.shape[:2]
-        anns = label_frame(det, color)
+        guv = None
+        jf = fp.parent / fp.name.replace("frame_", "joints_").replace(".png", ".json")
+        if jf.exists():                                    # collect_marker_data session
+            import json as _json
+            meta = _json.load(open(jf))
+            guv = fk_gripper_uv(meta["joints"], meta["K"])
+        anns = label_frame(det, color, gripper_uv=guv)
         name = f"{i:03d}_{fp.stem}"
         cv2.imwrite(str(dst / "images" / f"{name}.png"), color)
         with open(dst / "labels" / f"{name}.txt", "w") as f:
