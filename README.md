@@ -168,9 +168,14 @@ Live worklist; longer status/history lives in [CLAUDE.md](CLAUDE.md).
       degenerate); needs the ArUco tag sweep. Then: one shared real-deg↔model-qpos
       mapping layer used by FK / IK / viewers (currently duplicated, all assuming
       identity).
-- [ ] **ArUco tags** (printing in progress): tag0 36 mm wrist, tag1 24 mm finger
-      (optional), tag2 48 mm **world anchor** — patterns in `outputs/vision/aruco_tags/`.
-      World anchor decouples calibration from camera bumps (see PERCEPTION3D roadmap).
+- [ ] **ArUco tags**: printed + glued to the fingers, but the builds are missing the
+      **black border ring** (only white patch + inner cells) → undecodable: tried
+      OpenCV parameter storm (border bits, polarity, mirror), custom frame-fraction
+      template matching, a bright-quad detector, and **DeepArUco++** (pretrained, in an
+      isolated venv: fires on 2/5 poses at conf ≤0.09, decodes at hamming 9/16 ≈
+      chance). Same-batch tag2 (which HAS the ring) decodes at 22 px → **fix is
+      physical: sharpie a ~5 mm black square ring around the glued cells** (or
+      temporarily borrow tag2 for the sweep). `vision/tag_sweep.py` is ready and waits.
 - [ ] cm-level "fingertip mesh below table" in the twin — quantify after the tag
       sweep (mesh-vs-site vs real FK error not yet separable).
 - [x] ~~Consumers still fit a single table plane~~ — done: `cloud.extract_planes`
