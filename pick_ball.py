@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT / "vision"))
 
 XML = str(ROOT / "SO-ARM100/Simulation/SO101/scene.xml")
 HANDEYE = ROOT / "outputs/calib/handeye.json"
+TAG_CALIB = ROOT / "outputs/calib/tag_calib.json"   # wrist_roll mapping offset (delta)
 TCP_SITE = "gripperframe"
 ARM_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
 MOTOR_NAMES = ARM_JOINTS + ["gripper"]
@@ -39,6 +40,11 @@ BALL_Y = (-0.30, 0.30)
 BALL_Z = (-0.02, 0.12)
 
 APPROACH_CLEAR = 0.05      # pre-grasp clearance back along the fingers (m)
+GRASP_DEPTH = 0.014        # target BELOW ball centre: the TCP site is at the fingertip
+                           # plane, so aiming at the centre leaves the jaws on the top
+                           # hemisphere -> ball squirts out (2x "closed without contact",
+                           # 2026-06-12). Tips go to equator-14mm; spool top stays ~10mm
+                           # below the tips at the measured geometry.
 LIFT_CLEAR = 0.08          # lift height above grasp (m)
 GRIP_OPEN = 70.0           # gripper command while approaching (0=closed, 100=open)
 MOVE_SECONDS = 2.5         # per segment, linear joint interpolation
@@ -61,10 +67,19 @@ class Kin:
         # dof (velocity-space) indices of the arm joints, for jacobian columns
         self.dof = [self.m.jnt_dofadr[self.mj.mj_name2id(self.m, self.mj.mjtObj.mjOBJ_JOINT, j)]
                     for j in ARM_JOINTS]
+        # command->model roll mapping: the real wrist_roll horn sits ~-85 deg vs the
+        # model (measured by vision/tag_sweep.py, verified gauge-free via the jaw
+        # axis). Applied here only — IK in/out stays in command space. Without it
+        # the planned grasp point is ~11 mm off (missed grasp, 2026-06-12).
+        try:
+            self.roll_delta = float(json.load(open(TAG_CALIB))["delta_deg"])
+        except Exception:
+            self.roll_delta = 0.0
 
     def fk(self, ang_deg):
         for j, a in self.adr.items():
-            self.d.qpos[a] = math.radians(ang_deg.get(j, 0.0))
+            off = self.roll_delta if j == "wrist_roll" else 0.0
+            self.d.qpos[a] = math.radians(ang_deg.get(j, 0.0) + off)
         self.mj.mj_forward(self.m, self.d)
         R = self.d.site_xmat[self.sid].reshape(3, 3).copy()
         return R, self.d.site_xpos[self.sid].copy()
@@ -403,6 +418,8 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="Detect + print only, no arm.")
     ap.add_argument("--watch", action="store_true", help="Live Rerun detection preview, no arm.")
     ap.add_argument("--no-twin", action="store_true", help="Skip the MuJoCo twin window.")
+    ap.add_argument("--record", action="store_true",
+                    help="Save a camera frame at each grasp stage (forensics).")
     ap.add_argument("--port", default="/dev/ttyACM1")
     args = ap.parse_args()
 
@@ -437,7 +454,10 @@ def main():
 
     # IK both waypoints before touching the arm
     kin = Kin()
-    above, grasp, e_g, tilt, e_a = plan_waypoints(kin, np.asarray(p_base, float))
+    target = np.asarray(p_base, float) - [0, 0, GRASP_DEPTH]
+    if ball.get("z_table") is not None:                 # keep tips clear of the support
+        target[2] = max(target[2], ball["z_table"] + 0.008)
+    above, grasp, e_g, tilt, e_a = plan_waypoints(kin, target)
     print(f"  IK: grasp_err={e_g * 1000:.1f}mm  tilt={tilt:.0f}deg  "
           f"approach_short={e_a * 1000:.0f}mm")
     if e_g > 0.008 or tilt > 70 or e_a > 0.05:
@@ -464,22 +484,41 @@ def main():
     from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
     from gamepad_utils import graceful_shutdown
 
+    rec = None
+    if args.record:
+        import cv2
+        from datetime import datetime
+        from handeye_calib import Realsense
+        rec_dir = ROOT / "outputs/vision" / f"grasp_{datetime.now():%Y-%m-%d_%H-%M-%S}"
+        rec_dir.mkdir(parents=True, exist_ok=True)
+        rec_cam = Realsense()
+
+        def rec(stage):
+            c, _, _ = rec_cam.grab()
+            cv2.imwrite(str(rec_dir / f"{stage}.png"), c)
+        print(f"  recording stages -> {rec_dir}")
+
     robot = SOFollower(SOFollowerRobotConfig(port=args.port, id="so101", cameras={}))
     robot.connect()
     try:
         cur = read_angles(robot)
         print("1/6 above ball");  cur = move_to(robot, cur, above, twin=twin)
+        if rec: rec("1_above")
         print("2/6 descend");     cur = move_to(robot, cur, grasp, seconds=2.0, twin=twin)
+        if rec: rec("2_descend")
         print("3/6 close");       cur = close_on_ball(robot, cur, twin=twin)
+        if rec: rec("3_closed")
         lift = dict(cur); lift.update({k: above[k] for k in ARM_JOINTS})
         print("4/6 lift");        cur = move_to(robot, cur, lift, seconds=2.0, twin=twin)
         time.sleep(1.0)
+        if rec: rec("4_lifted")
         down = dict(cur); down.update({k: grasp[k] for k in ARM_JOINTS})
         print("5/6 put back");    cur = move_to(robot, cur, down, seconds=2.0, twin=twin)
         rel = dict(cur); rel["gripper"] = GRIP_OPEN
         print("6/6 release");     cur = move_to(robot, cur, rel, seconds=1.0, twin=twin)
         cur = move_to(robot, cur, dict(cur, **{k: above[k] for k in ARM_JOINTS}),
                       seconds=1.5, twin=twin)
+        if rec: rec("6_done")
         print("Done — grabbed, lifted, put back.")
     except KeyboardInterrupt:
         print("\nInterrupted.")
@@ -491,6 +530,8 @@ def main():
             robot.disconnect()
         except Exception:
             pass
+        if rec:
+            rec_cam.stop()
         if twin:
             twin.close()
 
