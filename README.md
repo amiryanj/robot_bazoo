@@ -173,8 +173,9 @@ Live worklist; longer status/history lives in [CLAUDE.md](CLAUDE.md).
       World anchor decouples calibration from camera bumps (see PERCEPTION3D roadmap).
 - [ ] cm-level "fingertip mesh below table" in the twin — quantify after the tag
       sweep (mesh-vs-site vs real FK error not yet separable).
-- [ ] Consumers still fit a single table plane (`fit_table_plane`); switch to
-      `cloud.extract_planes` + persistence (plate vs desk are two planes, 14 mm apart).
+- [x] ~~Consumers still fit a single table plane~~ — done: `cloud.extract_planes`
+      wired into `pick_ball` + `scene_debug`; support surfaces + ball attribution in
+      `vision/scene_model.py` (`scene_model.json` contract, v0).
 - [ ] Cosmetic: GLX errors when the MuJoCo twin window closes after a pick run.
 - [ ] Auto-record LeRobot dataset in a loop → train **ACT**, then **SmolVLA**.
 - [ ] Fix two-camera USB stall (wrist cam for grasp) or collect top-down-only first.
