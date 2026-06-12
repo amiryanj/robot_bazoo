@@ -93,15 +93,32 @@ The patch makes `configure()` apply per-motor gains from `outputs/tuning/gains.j
 connect (default P=32 so the arm holds against gravity) and makes camera connect/read
 fault-tolerant.
 
+## Documentation map
+
+Everything written down in this repo, from here:
+
+| Doc | What's in it |
+|---|---|
+| [CLAUDE.md](CLAUDE.md) | The deep reference: hardware gotchas, conventions, env pins, full status & history |
+| [vision/PERCEPTION3D.md](vision/PERCEPTION3D.md) | **3-D perception stack**: design + principles, sphere-fit localization, benchmark results, how to add new objects, roadmap (world-anchor tag, plane persistence, 3-D proposals) |
+| [vision/HANDEYE.md](vision/HANDEYE.md) | **Hand-eye calibration**: the math (joint 9-unknown solve), why a sticker marker works, how to re-run, how to consume `handeye.json` |
+| [vision/DETECTOR.md](vision/DETECTOR.md) | **Detector pipeline**: GDINO teacher → yolov8n student, auto-labeling, benchmark protocol, negative results |
+| [ESP32/CLAUDE.md](ESP32/CLAUDE.md) | Wrist-IMU firmware + host readers |
+
 ## Scripts
 
 | Script | What it does |
 |---|---|
 | `station.py` | **Main entry point.** Gamepad teleop + typed commands while motors, the wrist IMU, the controller, and (opt) cameras stream to one Rerun window + CSV. Flags: `--observe` (read-only), `--health`, `--cameras`, `--twin`, `--no-imu`, `--no-log`. |
+| `pick_ball.py` | Scripted ball pick (WIP): student-YOLO detection → sphere-fit 3-D → IK → staged grasp; `--dry-run`, `--watch`, `--selftest`, MuJoCo twin preview |
 | `gamepad_utils.py` | Shared controller profiles, smoothing, graceful shutdown |
 | `sim_collect.py` | Collect episodes in MuJoCo as a LeRobot dataset |
 | `servo_tuning.py` | Tuning toolbox: PID r/w, trajectories, step/FRF analysis |
 | `calibrate.py` | `step` / `chirp` / `profile` / `autotune` CLI for the servos |
+| `vision/scene_debug.py` | **The 3-D truth window**: camera panel + point cloud + MuJoCo twin; live measured-vs-predicted marker error |
+| `vision/handeye_calib.py` | Hand-eye calibration tool (gamepad + capture + solver) |
+| `vision/autolabel.py`, `vision/detector_bench.py`, `vision/bench_localize.py` | Detector auto-labeling / detector benchmark / 3-D localization benchmark |
+| `vision/collect_marker_data.py` | Bounded autonomous arm session for marker training data |
 | `ESP32/` | ESP32-C3 + ADXL345 IMU firmware and host-side readers |
 
 ```bash
@@ -135,13 +152,30 @@ Live worklist; longer status/history lives in [CLAUDE.md](CLAUDE.md).
       Per pose: pink pixel + depth → 3-D (cam frame), joint angles + MuJoCo FK →
       3-D (base frame); least-squares jointly fits T_cam→base **and** the marker offset.
       How/why: [vision/HANDEYE.md](vision/HANDEYE.md).
-- [~] **Scripted pick (WIP)** — `pick_ball.py`: GDINO ball detection + handeye +
-      multi-seed MuJoCo IK + twin preview + staged grasp behind a confirm. First real
-      grasp still pending (z-from-depth fix is in, untested on hardware).
+- [~] **Scripted pick (WIP)** — `pick_ball.py`: student-YOLO detection + sphere-fit
+      3-D + handeye + multi-seed MuJoCo IK + twin preview + staged grasp behind a
+      confirm. **Two grasp attempts missed so far**; localization side now certified
+      (sphere fit, ±2 mm vs known geometry — see PERCEPTION3D.md benchmark), the
+      remaining suspect is the kinematics side (below).
 - [~] **Fast scene detector** — GDINO-as-teacher auto-labeling (`vision/autolabel.py`)
       → yolov8n student + benchmark (`vision/detector_bench.py`). v1 trained on 45
       auto-labeled frames; see [vision/DETECTOR.md](vision/DETECTOR.md).
 - [ ] Scripted pick→rotate→place state machine, with randomization.
+
+**Open bugs / measurements pending (2026-06-12)**
+- [ ] **wrist_roll real↔model mapping offset** (suspected ~90°): a point marker
+      can't measure rotation about its own axis (proven — `vision/roll_id.py`
+      degenerate); needs the ArUco tag sweep. Then: one shared real-deg↔model-qpos
+      mapping layer used by FK / IK / viewers (currently duplicated, all assuming
+      identity).
+- [ ] **ArUco tags** (printing in progress): tag0 36 mm wrist, tag1 24 mm finger
+      (optional), tag2 48 mm **world anchor** — patterns in `outputs/vision/aruco_tags/`.
+      World anchor decouples calibration from camera bumps (see PERCEPTION3D roadmap).
+- [ ] cm-level "fingertip mesh below table" in the twin — quantify after the tag
+      sweep (mesh-vs-site vs real FK error not yet separable).
+- [ ] Consumers still fit a single table plane (`fit_table_plane`); switch to
+      `cloud.extract_planes` + persistence (plate vs desk are two planes, 14 mm apart).
+- [ ] Cosmetic: GLX errors when the MuJoCo twin window closes after a pick run.
 - [ ] Auto-record LeRobot dataset in a loop → train **ACT**, then **SmolVLA**.
 - [ ] Fix two-camera USB stall (wrist cam for grasp) or collect top-down-only first.
 
