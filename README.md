@@ -152,22 +152,30 @@ Live worklist; longer status/history lives in [CLAUDE.md](CLAUDE.md).
       Per pose: pink pixel + depth → 3-D (cam frame), joint angles + MuJoCo FK →
       3-D (base frame); least-squares jointly fits T_cam→base **and** the marker offset.
       How/why: [vision/HANDEYE.md](vision/HANDEYE.md).
-- [~] **Scripted pick (WIP)** — `pick_ball.py`: student-YOLO detection + sphere-fit
-      3-D + handeye + multi-seed MuJoCo IK + twin preview + staged grasp behind a
-      confirm. **Two grasp attempts missed so far**; localization side now certified
-      (sphere fit, ±2 mm vs known geometry — see PERCEPTION3D.md benchmark), the
-      remaining suspect is the kinematics side (below).
+- [~] **Scripted pick — FIRST VERIFIED GRASP 2026-06-12 night** (`pick_ball.py`):
+      gripper stalled on the ball → lifted → surface empty → placed back. What it
+      took (all measured, see commit 8a3e7a7): the wrist_roll −84.6° mapping delta
+      applied at one deg→qpos boundary (FK/IK + every viewer), a **+32 mm z bias**
+      (physical fingertips higher than the model TCP — plate-touch probe), an
+      **x bias** from live sweep-contact sensing, and the **jaw close-axis rotated
+      90°** (the single-actuated jaw was batting the foam ball away). Capture margin
+      is ±8 mm and the FK bias drifts across the plate → reliability needs the
+      arm-kinematics ID (below).
 - [~] **Fast scene detector** — GDINO-as-teacher auto-labeling (`vision/autolabel.py`)
       → yolov8n student + benchmark (`vision/detector_bench.py`). v1 trained on 45
       auto-labeled frames; see [vision/DETECTOR.md](vision/DETECTOR.md).
 - [ ] Scripted pick→rotate→place state machine, with randomization.
 
 **Open bugs / measurements pending (2026-06-12)**
-- [ ] **wrist_roll real↔model mapping offset** (suspected ~90°): a point marker
-      can't measure rotation about its own axis (proven — `vision/roll_id.py`
-      degenerate); needs the ArUco tag sweep. Then: one shared real-deg↔model-qpos
-      mapping layer used by FK / IK / viewers (currently duplicated, all assuming
-      identity).
+- [x] ~~wrist_roll mapping offset~~ — measured −84.6° (jaw-sweep, gauge-broken) and
+      now applied at one shared deg→qpos boundary in FK/IK/Twin/scene_debug. A/B
+      renders from the calibrated camera match the real gripper.
+- [ ] **Arm kinematics ID** (the big remaining accuracy item): FK position bias is
+      pose-dependent (measured: +32 mm z everywhere probed, ~+21 mm x at one spot,
+      drifting across the plate; tag data showed roll-structured residuals no
+      constant delta explains). Fix = full joint-offset/scale + finger-geometry fit
+      from a varied-pose ArUco dataset; until then `corner_fkerr.json` feeds local
+      measured biases forward and the pursuit loop closes the rest.
 - [ ] **ArUco tags**: printed + glued to the fingers, but the builds are missing the
       **black border ring** (only white patch + inner cells) → undecodable: tried
       OpenCV parameter storm (border bits, polarity, mirror), custom frame-fraction
