@@ -175,17 +175,32 @@ def draw_button(surf, x: int, y: int, pressed: bool, label: str):
 
 # ── Graceful shutdown ──────────────────────────────────────────────────────────
 
-# Safe resting pose used during graceful shutdown.
-# shoulder_lift should be low enough that gravity doesn't yank the arm
-# when torque cuts off. Tune this to match your arm's physical rest position.
+# Two-stage landing (2026-06-12). REST_POSE is the full-torque approach target,
+# ~14 mm (FK-checked) above the arm's measured min-energy pose — margin against
+# collisions. From there graceful_shutdown clamps Torque_Limit to SOFT_TORQUE and
+# floats down to SETTLE_POSE (the torque-off equilibrium measured from station.csv
+# cold starts, commanded ~1.5 deg past contact): the limited servo stalls gently on
+# the table instead of pressing, and the final torque-off drops millimeters. The
+# old single pose (lift 40, wrist 0) dropped the gripper 87 mm with a clunk.
 REST_POSE = {
     "shoulder_pan":  0.0,
-    "shoulder_lift": 40.0,    # lower arm toward table — tune if needed
-    "elbow_flex":    0.0,
-    "wrist_flex":    0.0,
+    "shoulder_lift": 73.0,
+    "elbow_flex":    -4.0,
+    "wrist_flex":    -60.0,
     "wrist_roll":    0.0,
-    "gripper":       0.0,
+    "gripper":       4.0,
 }
+
+SETTLE_POSE = {
+    "shoulder_pan":  0.0,
+    "shoulder_lift": 81.0,
+    "elbow_flex":    -5.0,
+    "wrist_flex":    -72.0,
+    "wrist_roll":    0.0,
+    "gripper":       4.0,
+}
+
+SOFT_TORQUE = 150      # Torque_Limit (RAM, 0-1000) during the compliant descent
 
 
 def graceful_shutdown(robot, duration_s: float = 5.0, hz: float = 30) -> None:
@@ -210,7 +225,29 @@ def graceful_shutdown(robot, duration_s: float = 5.0, hz: float = 30) -> None:
         except Exception:
             break
         time.sleep(dt)
-    print("  Rest pose reached.")
+
+    # compliant final descent: clamp servo output, float onto the table, stall
+    # gently on contact; then zero the position error before restoring torque so
+    # nothing presses, and the upcoming torque-off is a non-event.
+    try:
+        robot.bus.sync_write("Torque_Limit",
+                             {n: SOFT_TORQUE for n in MOTOR_NAMES}, normalize=False)
+        steps = round(2.0 * hz)
+        for i in range(1, steps + 1):
+            alpha = i / steps
+            goal = {n: REST_POSE[n] + alpha * (SETTLE_POSE[n] - REST_POSE[n])
+                    for n in MOTOR_NAMES}
+            robot.send_action({f"{n}.pos": goal[n] for n in MOTOR_NAMES})
+            time.sleep(1.0 / hz)
+        time.sleep(0.3)
+        obs = robot.get_observation()
+        robot.send_action({f"{n}.pos": obs.get(f"{n}.pos", SETTLE_POSE[n])
+                           for n in MOTOR_NAMES})
+        robot.bus.sync_write("Torque_Limit",
+                             {n: 1000 for n in MOTOR_NAMES}, normalize=False)
+    except Exception:
+        pass
+    print("  Rest pose reached (soft landing).")
 
 
 # ── Pygame widget helpers ──────────────────────────────────────────────────────

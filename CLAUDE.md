@@ -324,8 +324,14 @@ so it survives a re-clone; edit it (not EEPROM) to change standing gains.
       `sim_backend.SimRobot`: plan 0.4 mm, sim TCP tracks within ~7 mm. Only physical
       contact remains untested — first real grasp happens with Javad present.
 - [ ] Resonance ID / input shaping from chirp + IMU (encoder-only ceiling ~20–30 Hz)
-- [ ] Revisit `graceful_shutdown` — Ctrl-C rest-pose move was abrupt/noisy (tune
-      `REST_POSE` / duration, maybe slower easing)
+- [x] **`graceful_shutdown` soft landing (2026-06-12)** — old `REST_POSE` (lift 40)
+      left the gripper 87 mm up; torque-off dropped it with a clunk. Now two-stage:
+      full-torque ease to a raised rest (~14 mm above the measured min-energy pose
+      from station.csv cold starts), then `Torque_Limit` (RAM, no EEPROM wear)
+      clamped to 150/1000 for a compliant float-down to `SETTLE_POSE` — stalls
+      gently on contact, error zeroed, limit restored. Verified on hardware:
+      settles ±2.6 deg of equilibrium, TL back at 1000. The STS3215 has no real
+      torque/impedance mode; RAM `Torque_Limit` is the compliance lever.
 - [ ] Realsense + wrist cam USB bandwidth (works alone, stalls together)
 - [ ] Collect sim episodes → cloud ACT training (plan exists)
 
