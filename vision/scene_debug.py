@@ -40,13 +40,17 @@ def main():
     ap.add_argument("--no-arm", action="store_true", help="camera only (no FK overlay)")
     args = ap.parse_args()
 
-    import cv2  # noqa: F401
+    import cv2
     import math
     import mujoco
     import mujoco.viewer
+    import rerun as rr
+    import rerun.blueprint as rrb
     import torch
     from ball import deproject, fit_table_plane, WORKSPACE_Z
-    from ball_yolo import ball_from_box
+    from ball_yolo import BALL_RADIUS_M, ball_from_box
+    from cloud import crop_z, fit_sphere_known_r
+    from cloud import deproject as cloud_deproject
     from handeye_calib import HeartDetector, Realsense, backproject, make_fk
     from pick_ball import BallDetector
 
@@ -75,6 +79,19 @@ def main():
            for j in MOTOR_NAMES}
     viewer = mujoco.viewer.launch_passive(m, d)
 
+    rr.init("scene_debug", spawn=True)
+    rr.send_blueprint(rrb.Blueprint(
+        rrb.Horizontal(rrb.Spatial2DView(origin="cam", name="camera"),
+                       rrb.Spatial3DView(origin="world", name="cloud (base frame)")),
+        collapse_panels=True))
+
+    def project(p_base, K):
+        """Base-frame point -> image pixel via the hand-eye transform."""
+        pc = R_cb.T @ (np.asarray(p_base) - t_cb)
+        if pc[2] <= 0.05:
+            return None
+        return (K["fx"] * pc[0] / pc[2] + K["ppx"], K["fy"] * pc[1] / pc[2] + K["ppy"])
+
     # table plane: fit once (full-frame RANSAC is too slow per-loop)
     color, depth, K = cam.grab()
     pts = deproject(depth, K).reshape(-1, 3)
@@ -90,9 +107,20 @@ def main():
                             np.array([r, 0, 0], float), np.asarray(pos, float),
                             np.eye(3).ravel(), np.array(rgba, np.float32))
 
+    def to_base(pts):
+        return (R_cb @ pts.T).T + t_cb
+
+    frame_i = 0
     try:
         while viewer.is_running():
             color, depth, K = cam.grab()
+            frame_i += 1
+
+            # 3-D debug panel: workspace cloud (every 5th frame, subsampled)
+            if frame_i % 5 == 1:
+                pc = crop_z(cloud_deproject(depth, K), WORKSPACE_Z)
+                rr.log("world/cloud", rr.Points3D(to_base(pc[::12]), radii=0.0012,
+                                                  colors=(150, 150, 150)))
 
             box, conf = balls.detect(color)
             p_ball = None
@@ -101,13 +129,33 @@ def main():
                 if b:
                     p_ball = R_cb @ b["center3d"] + t_cb
                     r_ball = b["radius_m"]
+                # sphere-fit forensics: which points the fitter believed
+                pad = max((box[2] - box[0]) // 6, 3)
+                bp = crop_z(cloud_deproject(depth, K, box=(box[0] - pad, box[1] - pad,
+                                                           box[2] + pad, box[3] + pad)),
+                            WORKSPACE_Z)
+                fit = fit_sphere_known_r(bp, BALL_RADIUS_M)
+                if fit is not None:
+                    err = np.abs(np.linalg.norm(bp - fit["center"], axis=1) - BALL_RADIUS_M)
+                    inl = err < 0.004
+                    rr.log("world/ball_inliers", rr.Points3D(to_base(bp[inl]),
+                                                             radii=0.0015, colors=(40, 220, 60)))
+                    rr.log("world/ball_outliers", rr.Points3D(to_base(bp[~inl]),
+                                                              radii=0.0015, colors=(220, 60, 40)))
+                if p_ball is not None:
+                    rr.log("world/ball_center", rr.Points3D([p_ball], radii=r_ball,
+                                                            colors=(245, 130, 40, 120)))
 
-            uv, _ = hearts.marker_uv(color)
+            uv, heart_boxes = hearts.marker_uv(color)
             p_heart_meas = None
             if uv is not None:
                 pc = backproject(*uv, depth, K)
                 if pc is not None:
                     p_heart_meas = R_cb @ pc + t_cb
+
+            for nm, p, col in (("heart_meas", p_heart_meas, (255, 30, 200)),):
+                if p is not None:
+                    rr.log(f"world/{nm}", rr.Points3D([p], radii=0.008, colors=col))
 
             p_heart_pred = None
             if robot is not None:
@@ -118,6 +166,35 @@ def main():
                 mujoco.mj_forward(m, d)
                 R_w, t_w = fk(ang)
                 p_heart_pred = R_w @ offset + t_w
+                rr.log("world/heart_pred", rr.Points3D([p_heart_pred], radii=0.008,
+                                                       colors=(30, 255, 60)))
+
+            # camera panel: image + ball box + every heart candidate + projected points
+            rr.log("cam/image", rr.Image(cv2.cvtColor(color, cv2.COLOR_BGR2RGB)))
+            if box:
+                rr.log("cam/ball", rr.Boxes2D(
+                    array=[[box[0], box[1], box[2] - box[0], box[3] - box[1]]],
+                    array_format=rr.Box2DFormat.XYWH, labels=[f"ball {conf:.2f}"]))
+            else:
+                rr.log("cam/ball", rr.Clear(recursive=False))
+            if heart_boxes:
+                rr.log("cam/hearts", rr.Boxes2D(
+                    array=[[x1, y1, x2 - x1, y2 - y1] for (x1, y1, x2, y2), *_ in heart_boxes],
+                    array_format=rr.Box2DFormat.XYWH,
+                    labels=[f"{c:.2f} pink={f:.2f}" for _, c, _, f in heart_boxes]))
+            else:
+                rr.log("cam/hearts", rr.Clear(recursive=False))
+            pts, cols = [], []
+            if uv is not None:
+                pts.append(list(uv)); cols.append((255, 30, 200))      # measured: magenta
+            if p_heart_pred is not None:
+                pp = project(p_heart_pred, K)
+                if pp is not None:
+                    pts.append(list(pp)); cols.append((30, 255, 60))   # predicted: green
+            if pts:
+                rr.log("cam/points", rr.Points2D(pts, radii=7, colors=cols))
+            else:
+                rr.log("cam/points", rr.Clear(recursive=False))
 
             scn = viewer.user_scn
             i = 0
