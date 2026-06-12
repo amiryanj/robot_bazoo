@@ -47,7 +47,7 @@ def main():
     import rerun as rr
     import rerun.blueprint as rrb
     import torch
-    from ball import deproject, fit_table_plane, WORKSPACE_Z
+    from ball import WORKSPACE_Z
     from ball_yolo import BALL_RADIUS_M, ball_from_box
     from cloud import crop_z, fit_sphere_known_r
     from cloud import deproject as cloud_deproject
@@ -92,15 +92,24 @@ def main():
             return None
         return (K["fx"] * pc[0] / pc[2] + K["ppx"], K["fy"] * pc[1] / pc[2] + K["ppy"])
 
-    # table plane: fit once (full-frame RANSAC is too slow per-loop)
+    # support planes: fit once at startup (full-frame RANSAC is too slow per-loop)
+    from cloud import extract_planes
     color, depth, K = cam.grab()
-    pts = deproject(depth, K).reshape(-1, 3)
-    valid = pts[(pts[:, 2] > WORKSPACE_Z[0]) & (pts[:, 2] < WORKSPACE_Z[1])]
-    n_cam, d_cam, _ = fit_table_plane(valid)
-    n_b = R_cb @ n_cam
-    d_b = d_cam - n_b @ t_cb
-    z_table0 = -(d_b + n_b[0] * 0.25) / n_b[2]            # plane height near x=0.25,y=0
-    print(f"fitted plane ~z={z_table0 * 1000:.0f}mm in base frame (under x=0.25)")
+    pc0 = crop_z(cloud_deproject(depth, K), WORKSPACE_Z)
+    base0 = (R_cb @ pc0.T).T + t_cb
+    supports = [pl for pl in extract_planes(base0[::4], max_planes=3)
+                if abs(pl["n"][2]) > 0.95]
+    print("support planes at "
+          f"{[round(float(pl['centroid'][2]) * 1000) for pl in supports]} mm (base frame)")
+    z_table0 = float(supports[0]["centroid"][2]) if supports else -0.026
+    for i, pl in enumerate(supports):
+        lo, hi = np.asarray(pl["extent"][0]), np.asarray(pl["extent"][1])
+        ctr = (lo + hi) / 2
+        half = np.maximum((hi - lo) / 2, 0.01)
+        rr.log(f"world/support_{i}", rr.Boxes3D(
+            centers=[[ctr[0], ctr[1], float(pl['centroid'][2])]],
+            half_sizes=[[half[0], half[1], 0.001]],
+            colors=(200, 190, 160, 90)))
 
     def add_sphere(scn, i, pos, r, rgba):
         mujoco.mjv_initGeom(scn.geoms[i], mujoco.mjtGeom.mjGEOM_SPHERE,
@@ -125,7 +134,7 @@ def main():
             box, conf = balls.detect(color)
             p_ball = None
             if box:
-                b = ball_from_box(box, conf, depth, K, plane=(n_cam, d_cam))
+                b = ball_from_box(box, conf, depth, K)
                 if b:
                     p_ball = R_cb @ b["center3d"] + t_cb
                     r_ball = b["radius_m"]

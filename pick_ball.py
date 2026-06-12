@@ -221,8 +221,10 @@ def localize_base(detector=None):
     frame + detection overlay to outputs/vision/pick_<ts>/ for debugging."""
     import cv2
     from datetime import datetime
-    from ball import deproject, fit_table_plane, WORKSPACE_Z
+    from ball import WORKSPACE_Z
     from ball_yolo import ball_from_box
+    from cloud import crop_z, extract_planes
+    from cloud import deproject as cloud_deproject
     from handeye_calib import Realsense
 
     he = json.load(open(HANDEYE))
@@ -235,11 +237,8 @@ def localize_base(detector=None):
     finally:
         cam.stop()
 
-    pts = deproject(depth, K).reshape(-1, 3)
-    valid = pts[(pts[:, 2] > WORKSPACE_Z[0]) & (pts[:, 2] < WORKSPACE_Z[1])]
-    n, pd, _ = fit_table_plane(valid)
     box, score = detector.detect(color)
-    ball = ball_from_box(box, score, depth, K, plane=(n, pd)) if box else None
+    ball = ball_from_box(box, score, depth, K) if box else None
 
     out = ROOT / "outputs/vision" / f"pick_{datetime.now():%Y-%m-%d_%H-%M-%S}"
     out.mkdir(parents=True, exist_ok=True)
@@ -255,17 +254,25 @@ def localize_base(detector=None):
     if ball is None:
         return None, None
     p_base = R_cb @ ball["center3d"] + t_cb
-    # z comes FROM DEPTH (ball top - radius along the ray): it stays honest when the
-    # ball sits on a holder. The RANSAC plane is only a reference — and with the white
-    # plate (~1cm) on the wooden desk there are TWO planes; the fit may land on either.
-    n_b = R_cb @ n
-    d_b = pd - n_b @ t_cb
-    z_table = -(d_b + n_b[0] * p_base[0] + n_b[1] * p_base[1]) / n_b[2]
-    above = (p_base[2] - ball["radius_m"]) - z_table
-    print(f"  z(depth)={p_base[2] * 1000:.0f}mm; fitted plane at {z_table * 1000:.0f}mm -> "
-          f"ball bottom {above * 1000:+.0f}mm above it "
-          f"({'resting on it' if abs(above) < 0.012 else 'raised — holder? other plane?'})")
-    ball["z_table"] = float(z_table)
+    # z comes from the sphere fit. The scene's SUPPORT planes (plate, desk, spool top —
+    # extract_planes separates them) are reported as context: which one the ball rests
+    # on, or that it's raised.
+    pts = crop_z(cloud_deproject(depth, K), WORKSPACE_Z)
+    base_pts = (R_cb @ pts.T).T + t_cb
+    supports = [pl for pl in extract_planes(base_pts[::4], max_planes=3)
+                if abs(pl["n"][2]) > 0.95]
+    z_table, resting = None, None
+    bottom = p_base[2] - ball["radius_m"]
+    for pl in supports:
+        z = float(pl["centroid"][2])
+        if z_table is None or abs(bottom - z) < abs(bottom - z_table):
+            z_table = z
+    if z_table is not None:
+        resting = abs(bottom - z_table) < 0.012
+        print(f"  supports at {[round(float(pl['centroid'][2]) * 1000) for pl in supports]}mm; "
+              f"ball bottom {bottom * 1000:.0f}mm -> "
+              f"{'resting on the ' + str(round(z_table * 1000)) + 'mm plane' if resting else 'raised'}")
+    ball["z_table"] = z_table
     return p_base, ball
 
 
