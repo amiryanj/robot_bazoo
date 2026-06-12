@@ -97,6 +97,44 @@ def scan(color, depth, K, R_cb, t_cb, ball_detector=None):
                 planes=planes, objects=objects, blobs=blobs)
 
 
+def add_captions(model_dict, color, K, R_cb, t_cb):
+    """Name the blobs: Florence-2-base region captions on each blob's projected bbox
+    (probe 2026-06-12: 'a printer', 'bunch of wires', 'a basketball sitting in a
+    basketball hoop' for the ball-on-spool — geometry from depth, semantics from RGB).
+    Lazy-loads the model (~0.5 GB fp16); needs `timm`."""
+    import cv2
+    import torch
+    from PIL import Image
+    from transformers import AutoModelForCausalLM, AutoProcessor
+    mid = "microsoft/Florence-2-base"
+    proc = AutoProcessor.from_pretrained(mid, trust_remote_code=True)
+    net = (AutoModelForCausalLM.from_pretrained(mid, trust_remote_code=True,
+                                                torch_dtype=torch.float16)
+           .to("cuda" if torch.cuda.is_available() else "cpu").eval())
+    rgb = cv2.cvtColor(color, cv2.COLOR_BGR2RGB)
+    H, W = rgb.shape[:2]
+
+    def proj(p):
+        pc = R_cb.T @ (np.asarray(p) - t_cb)
+        return int(K["fx"] * pc[0] / pc[2] + K["ppx"]), int(K["fy"] * pc[1] / pc[2] + K["ppy"])
+
+    for b in model_dict.get("blobs", []):
+        lo, hi = np.array(b["extent_min"]), np.array(b["extent_max"])
+        cs = [proj([x, y, z]) for x in (lo[0], hi[0]) for y in (lo[1], hi[1])
+              for z in (lo[2], hi[2])]
+        us, vs = [c[0] for c in cs], [c[1] for c in cs]
+        x1, y1 = max(min(us) - 8, 0), max(min(vs) - 8, 0)
+        x2, y2 = min(max(us) + 8, W - 1), min(max(vs) + 8, H - 1)
+        if x2 - x1 < 16 or y2 - y1 < 16:
+            continue
+        inp = proc(text="<CAPTION>", images=Image.fromarray(rgb[y1:y2, x1:x2]),
+                   return_tensors="pt").to(net.device, torch.float16)
+        out = net.generate(input_ids=inp["input_ids"], pixel_values=inp["pixel_values"],
+                           max_new_tokens=40, num_beams=3)
+        b["caption"] = proc.batch_decode(out, skip_special_tokens=True)[0].strip()
+    return model_dict
+
+
 def save(model, path=OUT):
     path.parent.mkdir(parents=True, exist_ok=True)
     json.dump(model, open(path, "w"), indent=2)
@@ -124,16 +162,23 @@ def summarize(model):
         fx = (np.array(b["extent_max"]) - np.array(b["extent_min"])) * 1000
         on = (f"on plane {b['resting_plane']}" if b["resting_plane"] is not None
               else "floating/attached")
+        cap = f" — \"{b['caption']}\"" if b.get("caption") else ""
         lines.append(f"  blob: ctr=[{c[0]:.0f} {c[1]:.0f} {c[2]:.0f}]mm "
                      f"footprint {fx[0]:.0f}x{fx[1]:.0f} h={b['height'] * 1000:.0f}mm "
-                     f"({b['n_pts']} vox) — {on}")
+                     f"({b['n_pts']} vox) — {on}{cap}")
     return "\n".join(lines)
 
 
 def main():
+    import argparse
     import torch
     from handeye_calib import Realsense
     from pick_ball import BallDetector
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--caption", action="store_true",
+                    help="Name the blobs with Florence-2 (downloads ~0.5 GB once).")
+    args = ap.parse_args()
 
     he = json.load(open(HANDEYE))
     R_cb, t_cb = np.array(he["R"]), np.array(he["t"])
@@ -144,6 +189,8 @@ def main():
     finally:
         cam.stop()
     model = scan(color, depth, K, R_cb, t_cb, ball_detector=det)
+    if args.caption:
+        model = add_captions(model, color, K, R_cb, t_cb)
     print(summarize(model))
     print("saved", save(model))
 
