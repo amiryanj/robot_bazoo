@@ -30,6 +30,13 @@ sys.path.insert(0, str(ROOT / "vision"))
 XML = str(ROOT / "SO-ARM100/Simulation/SO101/scene.xml")
 HANDEYE = ROOT / "outputs/calib/handeye.json"
 TAG_CALIB = ROOT / "outputs/calib/tag_calib.json"   # wrist_roll mapping offset (delta)
+# THE real-degrees -> model-qpos roll correction (the "layer in between"): real horn sits
+# ~-85deg vs the CAD zero (vision/tag_sweep.py). Every consumer that feeds live/command
+# angles into MuJoCo (FK/IK, the Twin, scene_debug) must add it, or sim != reality.
+try:
+    ROLL_DELTA_DEG = float(json.load(open(TAG_CALIB))["delta_deg"])
+except Exception:
+    ROLL_DELTA_DEG = 0.0
 TCP_SITE = "gripperframe"
 ARM_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
 MOTOR_NAMES = ARM_JOINTS + ["gripper"]
@@ -46,7 +53,7 @@ GRASP_DEPTH = 0.014        # target BELOW ball centre: the TCP site is at the fi
                            # 2026-06-12). Tips go to equator-14mm; spool top stays ~10mm
                            # below the tips at the measured geometry.
 LIFT_CLEAR = 0.08          # lift height above grasp (m)
-GRIP_OPEN = 70.0           # gripper command while approaching (0=closed, 100=open)
+GRIP_OPEN = 95.0           # gripper command while approaching (0=closed, 100=open)
 MOVE_SECONDS = 2.5         # per segment, linear joint interpolation
 RATE = 20                  # interpolation steps/s
 
@@ -71,10 +78,7 @@ class Kin:
         # model (measured by vision/tag_sweep.py, verified gauge-free via the jaw
         # axis). Applied here only — IK in/out stays in command space. Without it
         # the planned grasp point is ~11 mm off (missed grasp, 2026-06-12).
-        try:
-            self.roll_delta = float(json.load(open(TAG_CALIB))["delta_deg"])
-        except Exception:
-            self.roll_delta = 0.0
+        self.roll_delta = ROLL_DELTA_DEG
 
     def fk(self, ang_deg):
         for j, a in self.adr.items():
@@ -132,7 +136,7 @@ class Kin:
 # DLS is local, so try several postures along that constraint and keep the best —
 # far targets need the lean-forward branch, near ones the crouch.
 IK_SEEDS = [{"shoulder_lift": lift, "elbow_flex": elbow, "wrist_flex": 90 - lift - elbow,
-             "shoulder_pan": 0.0, "wrist_roll": 0.0, "gripper": 0.0}
+             "shoulder_pan": 0.0, "wrist_roll": 90.0, "gripper": 0.0}
             for lift, elbow in ((-20, 50), (10, 20), (30, 0), (45, -20), (0, 60))]
 
 
@@ -359,7 +363,8 @@ class Twin:
 
     def set(self, ang_deg):
         for j, a in self.adr.items():
-            self.d.qpos[a] = math.radians(ang_deg.get(j, 0.0))
+            off = ROLL_DELTA_DEG if j == "wrist_roll" else 0.0
+            self.d.qpos[a] = math.radians(ang_deg.get(j, 0.0) + off)
         self.mj.mj_forward(self.m, self.d)
         self.viewer.sync()
 
@@ -394,6 +399,7 @@ def close_on_ball(robot, pose, twin=None):
     """Close the gripper in small steps until the measured position stops following
     the command (contact) or it reaches near-closed. Returns the final command pose."""
     cmd = dict(pose)
+    trace = []
     for g in np.arange(pose["gripper"], 2.0, -3.0):
         cmd["gripper"] = float(g)
         robot.send_action({f"{n}.pos": cmd[n] for n in MOTOR_NAMES})
@@ -401,12 +407,13 @@ def close_on_ball(robot, pose, twin=None):
             twin.set(cmd)
         time.sleep(0.15)
         meas = read_angles(robot)["gripper"]
-        if meas - g > 8.0:                                # jaws stalled on the ball
+        trace.append((round(float(g), 1), round(float(meas), 1)))
+        if meas - g > 6.0:                                # jaws stalled on the ball
             cmd["gripper"] = float(meas - 4.0)            # squeeze a little, not max
             robot.send_action({f"{n}.pos": cmd[n] for n in MOTOR_NAMES})
             print(f"  contact: gripper held at {meas:.0f}, commanding {cmd['gripper']:.0f}")
             return cmd
-    print("  gripper closed without clear contact (ball smaller than expected?)")
+    print(f"  gripper closed without clear contact; trace (cmd,meas): {trace}")
     return cmd
 
 
@@ -457,6 +464,11 @@ def main():
     target = np.asarray(p_base, float) - [0, 0, GRASP_DEPTH]
     if ball.get("z_table") is not None:                 # keep tips clear of the support
         target[2] = max(target[2], ball["z_table"] + 0.008)
+    fkerr_file = ROOT / "outputs/calib/corner_fkerr.json"
+    if fkerr_file.exists():                             # measured local FK bias (tags,
+        fkerr = np.array(json.load(open(fkerr_file))["fkerr"])  # differential method)
+        target -= fkerr
+        print(f"  FK feed-forward: target shifted by {np.round(-fkerr * 1000).astype(int)} mm")
     above, grasp, e_g, tilt, e_a = plan_waypoints(kin, target)
     print(f"  IK: grasp_err={e_g * 1000:.1f}mm  tilt={tilt:.0f}deg  "
           f"approach_short={e_a * 1000:.0f}mm")
@@ -505,7 +517,25 @@ def main():
         print("1/6 above ball");  cur = move_to(robot, cur, above, twin=twin)
         if rec: rec("1_above")
         print("2/6 descend");     cur = move_to(robot, cur, grasp, seconds=2.0, twin=twin)
-        if rec: rec("2_descend")
+        if rec:
+            import cv2 as _cv
+            time.sleep(0.4)
+            _c, _, _K = rec_cam.grab()
+            he3 = json.load(open(HANDEYE))
+            _R, _t = np.array(he3["R"]), np.array(he3["t"])
+            _, _ptcp = kin.fk(read_angles(robot))
+
+            def _proj(p):
+                pc = _R.T @ (np.asarray(p) - _t)
+                return (int(_K["fx"] * pc[0] / pc[2] + _K["ppx"]),
+                        int(_K["fy"] * pc[1] / pc[2] + _K["ppy"]))
+            _cv.drawMarker(_c, _proj(_ptcp), (0, 255, 0), _cv.MARKER_CROSS, 24, 3)
+            _cv.circle(_c, _proj(p_base), 8, (0, 165, 255), 3)
+            _cv.imwrite(str(rec_dir / "2_descend_aim.png"), _c)
+
+        # (depth-cloud finger servoing at the grasp pose was tried and removed: the
+        # wrist occludes the scene below it — the top-down camera is blind exactly
+        # there. Closed-loop correction lives in the ball-displacement pursuit instead.)
         print("3/6 close");       cur = close_on_ball(robot, cur, twin=twin)
         if rec: rec("3_closed")
         lift = dict(cur); lift.update({k: above[k] for k in ARM_JOINTS})

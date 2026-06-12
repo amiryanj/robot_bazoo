@@ -182,8 +182,10 @@ def main():
             if robot is not None:
                 obs = robot.get_observation()
                 ang = {n: obs.get(f"{n}.pos", 0.0) for n in MOTOR_NAMES}
+                from pick_ball import ROLL_DELTA_DEG
                 for j, a in adr.items():
-                    d.qpos[a] = math.radians(ang[j])
+                    off = ROLL_DELTA_DEG if j == "wrist_roll" else 0.0
+                    d.qpos[a] = math.radians(ang[j] + off)
                 mujoco.mj_forward(m, d)
                 R_w, t_w = fk(ang)
                 p_heart_pred = R_w @ offset + t_w
