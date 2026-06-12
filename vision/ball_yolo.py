@@ -36,40 +36,41 @@ def load_model(path=MODEL):
     return YOLO(str(path))
 
 
-def ball_from_box(box, score, depth, K, plane=None):
-    """2-D ball box -> 3D centre (camera frame) + radius, detector-agnostic.
+BALL_RADIUS_M = 0.0245            # known: Ø49 mm mini basketball — a constraint, not
+                                  # an estimate (box-size radius estimates were ±3 mm)
 
-    The box centre pixel is back-projected through its depth to the visible cap
-    (top of the ball, top-down). The true centre sits ~one radius behind that,
-    toward the table (along the plane normal if given, else +Z)."""
+
+def ball_from_box(box, score, depth, K, plane=None, radius=BALL_RADIUS_M):
+    """2-D ball box -> 3D centre (camera frame), detector-agnostic.
+
+    Robust path: known-radius RANSAC sphere fit to the box's point cloud (background
+    and silhouette-bleed pixels don't lie on the sphere -> rejected, where the old
+    box-median depth was dragged toward the background by 1-3 cm). Falls back to
+    nearest-depth + radius along the ray. `fit_ok` + `inliers`/`fit_rms` let callers
+    refuse a bad frame instead of grasping on faith."""
+    from cloud import deproject, crop_z, fit_sphere_known_r, nearest_depth_center
     x1, y1, x2, y2 = box
     u, v = (x1 + x2) // 2, (y1 + y2) // 2
 
-    # robust surface depth: median of valid in-workspace depth in the box's central
-    # quarter (mostly ball, avoids the table ring around the box edges)
-    qx, qy = (x2 - x1) // 4, (y2 - y1) // 4
-    win = depth[y1 + qy:y2 - qy, x1 + qx:x2 - qx]
-    win = win[(win > WORKSPACE_Z[0]) & (win < WORKSPACE_Z[1])]
-    if len(win) < 10:
+    pad = max((x2 - x1) // 6, 3)                          # GDINO boxes run tight/loose
+    pts = deproject(depth, K, box=(x1 - pad, y1 - pad, x2 + pad, y2 + pad))
+    pts = crop_z(pts, WORKSPACE_Z)
+    if len(pts) < 30:
         return None
-    z = float(np.median(win))
 
-    surface = np.array([(u - K["ppx"]) * z / K["fx"],
-                        (v - K["ppy"]) * z / K["fy"], z])
-
-    r_px = ((x2 - x1) + (y2 - y1)) / 4                   # box half-extent in pixels
-    radius_m = float(r_px * z / K["fx"])
-
-    center = surface.copy()
-    if plane is not None:
-        n, d = plane
-        n = n if (n @ surface + d) > 0 else -n           # point n away from table
-        center = surface - n * radius_m
+    fit = fit_sphere_known_r(pts, radius)
+    if fit is not None:
+        center = fit["center"]
+        quality = dict(fit_ok=True, inliers=fit["inliers"], fit_rms=fit["rms"])
     else:
-        center = surface + np.array([0, 0, radius_m])     # fallback: +Z (into scene)
+        center = nearest_depth_center(pts, radius)
+        if center is None:
+            return None
+        quality = dict(fit_ok=False, inliers=0, fit_rms=float("nan"))
 
-    return dict(center3d=center, surface3d=surface, radius_m=radius_m,
-                uv=(u, v), box=(x1, y1, x2, y2), conf=score)
+    surface = center - radius * center / np.linalg.norm(center)   # cap top, toward cam
+    return dict(center3d=center, surface3d=surface, radius_m=radius,
+                uv=(u, v), box=(x1, y1, x2, y2), conf=score, **quality)
 
 
 def localize_ball_yolo(color, depth, K, model, plane=None, conf=0.25):

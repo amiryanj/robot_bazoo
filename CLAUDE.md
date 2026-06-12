@@ -178,9 +178,16 @@ SmolVLA training+inference; big-VLA (7B) training needs the cloud.
   top-down Realsense → `outputs/vision/<ts>/`. For offline detector dev (no arm).
 - `vision/ball.py` — `fit_table_plane` (RANSAC, **works**, reused) + `localize_ball`
   (color+depth, **brittle** — wood reads orange; superseded by the YOLO localizer).
-- `vision/ball_yolo.py` — **the ball localizer.** Pretrained basketball YOLO
-  (`vision/models/basketball.pt`) → 2-D box → box centre back-projected through the
-  median in-box depth → 3-D ball point (cam frame); reuses `fit_table_plane`. Run
+- `vision/cloud.py` — **the generic 3-D layer** (see `vision/PERCEPTION3D.md`):
+  depth→cloud deprojection, multi-plane extraction (sequential RANSAC — separates the
+  white plate from the wooden desk), and geometric-prior fitters with quality records
+  (`fit_sphere_known_r`, `nearest_depth_center`). Nothing object-specific lives here.
+- `vision/ball_yolo.py` — **the ball localizer**: 2-D box (student YOLO or GDINO) →
+  `ball_from_box` → known-radius (Ø49 mm) RANSAC sphere fit on the box's point cloud
+  + inliers/rms quality gate. Replaced the box-median-depth estimator, which was
+  biased 1-3 cm toward the background by silhouette bleed (benchmark in
+  `vision/bench_localize.py`: legacy was 7 mm low in z, 13 mm off in y — a missed
+  grasp; sphere fit lands ±2 mm of known resting geometry). Run
   `python vision/ball_yolo.py [<capture_dir>]` to verify; writes `yolo_overlay.png`.
 - `vision/handeye_calib.py` — **hand-eye calibration** (eye-to-hand, T_cam→base). **Ran
   2026-06-11: 4.6 mm RMS over 16 poses → `outputs/calib/handeye.json`.** Marker = the

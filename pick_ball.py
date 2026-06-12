@@ -409,9 +409,15 @@ def main():
     p_base, ball = localize_base()
     if p_base is None:
         sys.exit("Ball not found in the frame — aborting (nothing moved).")
-    print(f"  conf={ball['conf']:.2f}  radius={ball['radius_m'] * 1000:.0f}mm  "
-          f"cam=({1000 * np.asarray(ball['center3d'])}).round mm")
+    if ball["fit_ok"]:
+        fit_msg = f"OK ({ball['inliers']} inliers, {ball['fit_rms'] * 1000:.1f}mm rms)"
+    else:
+        fit_msg = "FAILED — fallback estimate"
+    print(f"  conf={ball['conf']:.2f}  sphere fit: {fit_msg}")
     print(f"  ball centre, BASE frame = {np.round(p_base * 1000).astype(int)} mm")
+    if not args.dry_run and not ball["fit_ok"]:
+        sys.exit("Sphere fit failed — localization not trustworthy enough to grasp. "
+                 "Re-run; if persistent, check depth coverage on the ball.")
 
     inside = (BALL_X[0] <= p_base[0] <= BALL_X[1] and BALL_Y[0] <= p_base[1] <= BALL_Y[1]
               and BALL_Z[0] <= p_base[2] <= BALL_Z[1])
