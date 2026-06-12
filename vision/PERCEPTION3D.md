@@ -81,9 +81,20 @@ saved no K — lesson encoded in `collect_marker_data.py`, which saves both).
       real-degrees↔model-qpos conversion used by FK/IK/viewers, with per-joint
       offset/sign measured by a tag sweep — settles the wrist_roll question with a
       number and re-certifies the other joints.
-- [ ] **Plane persistence**: save `extract_planes` output (tagged by handeye
-      timestamp) to `outputs/calib/scene_planes.json`; consumers load instead of
-      refitting; invalidate whenever the camera moves (new handeye).
+- [ ] **World-anchor tag** (Javad's design, 2026-06-12): a fixed ArUco (tag id 2,
+      48 mm) glued to a static spot. Live T_cam→tag per frame + one-time T_tag→base
+      → camera moves/bumps stop invalidating anything; plane map and calibration key
+      to the tag, not to camera stillness. For tag work bump the COLOR stream to
+      1280×720 (doubles px/tag; independent stream) but KEEP DEPTH at 640×480 —
+      min-Z grows with depth resolution (~0.5 m at 720p = table at the blind edge).
+- [ ] **Plane persistence**: save `extract_planes` output (keyed to the world tag /
+      handeye timestamp) to `outputs/calib/scene_planes.json`; consumers load instead
+      of refitting.
+- [ ] **3-D coarse proposals** (detector-free): voxel-downsample → subtract known
+      planes → Euclidean clustering → "blobs above the table" as object candidates,
+      verified by the fine fitters. Lighting-independent (measured: depth quality in
+      the pitch-dark night session equals daylight — the D455's IR projector brings
+      its own texture). Complements the 2-D detector for unknown objects.
 - [ ] Cylinder fitter (spool/holder) — makes "ball on holder" a modelled fact instead
       of a special case, and is the second test of the recipe above.
 - [ ] Plane *boundaries* (hull polygons in plane coordinates) — workspace limits and
