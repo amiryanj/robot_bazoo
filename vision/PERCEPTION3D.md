@@ -104,8 +104,11 @@ saved no K — lesson encoded in `collect_marker_data.py`, which saves both).
       (debug value now); later, captured scenes become **sim assets for domain-
       randomized VLA episode generation** — the bridge from perception to the
       project's actual goal. Note: SAM is class-agnostic — it segments, GDINO names;
-      they're a pair, not alternatives. Mask-cropped clouds also kill the box-padding
-      heuristic in `ball_from_box`.
+      they're a pair, not alternatives. **Measured 2026-06-12** (FastSAM-s via our
+      ultralytics, box-prompt API): mask-cropped cloud = 93% sphere-fit inliers vs 51%
+      for box+pad, centre shift only 1–2 mm — the known-radius fit already rejects
+      clutter, so the ball path stays mask-free (simpler); masks become the default
+      crop for future objects whose fitters can't self-clean as decisively.
 - [ ] Cylinder fitter (spool/holder) — makes "ball on holder" a modelled fact instead
       of a special case, and is the second test of the recipe above.
 - [ ] Plane *boundaries* (hull polygons in plane coordinates) — workspace limits and
