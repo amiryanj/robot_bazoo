@@ -225,14 +225,18 @@ def selftest():
 # ── Realsense (own pipeline: aligned color+depth+intrinsics) ──────────────────────────
 
 class Realsense:
-    def __init__(self):
+    def __init__(self, color_res=(640, 480)):
+        """color_res: bump to (1280, 720) for small-tag work — color and depth are
+        independent streams; depth STAYS at 640x480 on purpose (its min-Z blind zone
+        grows with depth resolution). Depth is align-projected onto the color grid,
+        and intrinsics come per-grab, so consumers don't care about the choice."""
         import pyrealsense2 as rs
         self.rs = rs
         self.pipe = rs.pipeline()
         cfg = rs.config()
         cfg.enable_device(SERIAL)
         cfg.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-        cfg.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+        cfg.enable_stream(rs.stream.color, color_res[0], color_res[1], rs.format.bgr8, 30)
         prof = self.pipe.start(cfg)
         self.align = rs.align(rs.stream.color)
         self.scale = prof.get_device().first_depth_sensor().get_depth_scale()
