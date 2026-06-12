@@ -31,7 +31,8 @@ WORKSPACE_Z = (0.20, 1.2)
 
 def scan(color, depth, K, R_cb, t_cb, ball_detector=None):
     from ball_yolo import ball_from_box
-    from cloud import crop_z, deproject, extract_planes
+    from cloud import (crop_z, deproject, euclidean_clusters, extract_planes,
+                       voxel_downsample)
 
     pts = crop_z(deproject(depth, K), WORKSPACE_Z)
     base = (R_cb @ pts.T).T + t_cb
@@ -47,6 +48,31 @@ def scan(color, depth, K, R_cb, t_cb, ball_detector=None):
             support=support,
             n_inliers=p["n_inliers"],
             extent_min=p["extent"][0].tolist(), extent_max=p["extent"][1].tolist()))
+
+    # detector-free object discovery: voxelize, drop plane-adjacent points, cluster
+    # what sticks up. Class-agnostic "blob" cards — the robot's own arm shows up too
+    # (v0 doesn't subtract it; consumers can match blobs against FK later).
+    vox = voxel_downsample(base, voxel=0.008)
+    off_plane = np.ones(len(vox), bool)
+    for pl in planes:
+        n = np.array(pl["n"])
+        off_plane &= np.abs(vox @ n + pl["d"]) > 0.010
+    floor = min((pl["z_at_centroid"] for pl in planes if pl["support"]), default=0.0)
+    blobs_src = vox[off_plane & (vox[:, 2] > floor + 0.008)]
+    blobs = []
+    if len(blobs_src) > 30:
+        for cl in euclidean_clusters(blobs_src, radius=0.022, min_pts=12)[:8]:
+            P = blobs_src[cl]
+            lo, hi = P.min(0), P.max(0)
+            rest = None
+            for i, pl in enumerate(planes):
+                if pl["support"] and abs(lo[2] - pl["z_at_centroid"]) < 0.015:
+                    rest = i
+                    break
+            blobs.append(dict(cls="blob", n_pts=int(len(cl)),
+                              centroid=P.mean(0).tolist(),
+                              extent_min=lo.tolist(), extent_max=hi.tolist(),
+                              height=float(hi[2] - lo[2]), resting_plane=rest))
 
     objects = []
     if ball_detector is not None:
@@ -68,7 +94,7 @@ def scan(color, depth, K, R_cb, t_cb, ball_detector=None):
                                     inliers=b["inliers"], resting_plane=resting))
     return dict(created=datetime.now().isoformat(),
                 handeye=HANDEYE.stat().st_mtime if HANDEYE.exists() else None,
-                planes=planes, objects=objects)
+                planes=planes, objects=objects, blobs=blobs)
 
 
 def save(model, path=OUT):
@@ -93,6 +119,14 @@ def summarize(model):
               else "raised (holder?)")
         lines.append(f"  {o['cls']}: [{c[0]:.0f} {c[1]:.0f} {c[2]:.0f}]mm "
                      f"conf={o['conf']:.2f} — {on}")
+    for b in model.get("blobs", []):
+        c = np.array(b["centroid"]) * 1000
+        fx = (np.array(b["extent_max"]) - np.array(b["extent_min"])) * 1000
+        on = (f"on plane {b['resting_plane']}" if b["resting_plane"] is not None
+              else "floating/attached")
+        lines.append(f"  blob: ctr=[{c[0]:.0f} {c[1]:.0f} {c[2]:.0f}]mm "
+                     f"footprint {fx[0]:.0f}x{fx[1]:.0f} h={b['height'] * 1000:.0f}mm "
+                     f"({b['n_pts']} vox) — {on}")
     return "\n".join(lines)
 
 

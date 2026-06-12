@@ -133,6 +133,40 @@ def fit_sphere_known_r(points, r, iters=150, thresh=0.004, min_inliers=60, seed=
     return dict(center=c, inliers=int(inl.sum()), rms=rms)
 
 
+def voxel_downsample(points, voxel=0.008):
+    """One representative (centroid) point per occupied voxel."""
+    keys = np.floor(points / voxel).astype(np.int64)
+    _, idx, inv = np.unique(keys, axis=0, return_index=True, return_inverse=True)
+    sums = np.zeros((len(idx), 3))
+    np.add.at(sums, inv, points)
+    counts = np.bincount(inv, minlength=len(idx)).astype(float)
+    return sums / counts[:, None]
+
+
+def euclidean_clusters(points, radius=0.02, min_pts=15):
+    """Greedy BFS clustering (classic tabletop segmentation). Returns a list of index
+    arrays, largest first. Run on VOXEL-DOWNSAMPLED points — it's O(N·neighbors)."""
+    from scipy.spatial import cKDTree
+    tree = cKDTree(points)
+    unvisited = np.ones(len(points), bool)
+    clusters = []
+    for s in range(len(points)):
+        if not unvisited[s]:
+            continue
+        queue = [s]
+        unvisited[s] = False
+        members = [s]
+        while queue:
+            for j in tree.query_ball_point(points[queue.pop()], radius):
+                if unvisited[j]:
+                    unvisited[j] = False
+                    queue.append(j)
+                    members.append(j)
+        if len(members) >= min_pts:
+            clusters.append(np.array(members))
+    return sorted(clusters, key=len, reverse=True)
+
+
 def nearest_depth_center(points, r, pct=5):
     """Cheap fallback: the object's top is the NEAREST depth percentile (background
     bleed is always farther), centre = top + r along its viewing ray."""

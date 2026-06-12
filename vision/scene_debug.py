@@ -111,6 +111,18 @@ def main():
             half_sizes=[[half[0], half[1], 0.001]],
             colors=(200, 190, 160, 90)))
 
+    # last scene scan (vision/scene_model.py): blob cards as wireframe boxes
+    import scene_model as sm
+    model = sm.load()
+    if model:
+        for i, b in enumerate(model.get("blobs", [])):
+            lo, hi = np.asarray(b["extent_min"]), np.asarray(b["extent_max"])
+            rr.log(f"world/blob_{i}", rr.Boxes3D(
+                centers=[((lo + hi) / 2).tolist()],
+                half_sizes=[((hi - lo) / 2).tolist()],
+                colors=(90, 160, 255, 80),
+                labels=[f"blob h={b['height'] * 1000:.0f}mm"]))
+
     def add_sphere(scn, i, pos, r, rgba):
         mujoco.mjv_initGeom(scn.geoms[i], mujoco.mjtGeom.mjGEOM_SPHERE,
                             np.array([r, 0, 0], float), np.asarray(pos, float),
