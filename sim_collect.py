@@ -38,7 +38,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from gamepad_utils import (
     MOTOR_NAMES, JOINT_LIMITS,
-    detect_profile, get_joint_deltas, apply_deltas, is_neutral,
+    detect_profile, get_joint_deltas, apply_deltas, is_neutral, ButtonDebouncer,
     BLACK, WHITE, GRAY, GREEN, RED, YELLOW, CYAN, ORANGE,
     draw_stick, draw_button, draw_controller,
 )
@@ -205,6 +205,7 @@ def main():
     joystick = pygame.joystick.Joystick(0)
     joystick.init()
     profile = detect_profile(joystick)
+    debouncer = ButtonDebouncer()          # reject single-frame button chatter (worn ZR)
 
     # Dataset
     import json, shutil
@@ -270,7 +271,7 @@ def main():
                         print("  Ball reset.")
 
             # ── Joint control ─────────────────────────────────────────────────
-            deltas = get_joint_deltas(joystick, profile, dt=1.0 / FPS)
+            deltas = get_joint_deltas(joystick, profile, dt=1.0 / FPS, debounce=debouncer)
             if not is_neutral(deltas):
                 joint_pos = apply_deltas(joint_pos, deltas)
             set_joint_targets(mj_data, mj_model, joint_pos)

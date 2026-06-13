@@ -5,6 +5,10 @@ Provides constants, controller profiles, joystick delta calculation,
 and pygame drawing helpers used by teleop_gamepad, sim_collect, command_log.
 """
 
+import copy
+import json
+from pathlib import Path
+
 import pygame
 
 # ── Robot constants ────────────────────────────────────────────────────────────
@@ -33,6 +37,12 @@ JOINT_LIMITS = {
 }
 
 DEADZONE = 0.08
+DEFAULT_AXIS_DEADZONES = {
+    0: DEADZONE,  # left stick X
+    1: DEADZONE,  # left stick Y
+    2: DEADZONE,  # right stick X / Z on some SDL mappings
+    3: DEADZONE,  # right stick Y / RZ on some SDL mappings
+}
 
 # ── Controller profiles ────────────────────────────────────────────────────────
 
@@ -60,30 +70,236 @@ CONTROLLER_PROFILES = {
 }
 
 
+LAYOUT_DIR = Path(__file__).resolve().parent / "outputs" / "gamepad_layouts"
+
+
+def _safe_layout_id(text: str) -> str:
+    return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in text).strip("_") or "gamepad"
+
+
+def joystick_guid(joystick) -> str:
+    try:
+        guid = joystick.get_guid()
+    except Exception:
+        guid = ""
+    return guid or "unknown"
+
+
+def layout_path_for(joystick) -> Path:
+    guid = joystick_guid(joystick)
+    if guid != "unknown":
+        return LAYOUT_DIR / f"{_safe_layout_id(guid)}.json"
+    return LAYOUT_DIR / f"{_safe_layout_id(joystick.get_name())}.json"
+
+
+def _load_layout_override(joystick) -> dict | None:
+    path = layout_path_for(joystick)
+    if not path.exists():
+        return None
+    try:
+        with path.open() as f:
+            layout = json.load(f)
+    except Exception as exc:
+        print(f"  Gamepad layout override unreadable ({path}: {exc}); ignoring.")
+        return None
+    if not isinstance(layout.get("buttons"), dict):
+        print(f"  Gamepad layout override missing 'buttons' ({path}); ignoring.")
+        return None
+    buttons = {str(k): int(v) for k, v in layout["buttons"].items()}
+    reverse = {}
+    duplicates = []
+    for label, idx in buttons.items():
+        if idx in reverse:
+            duplicates.append(f"{label}/{reverse[idx]}={idx}")
+        reverse[idx] = label
+    if duplicates:
+        print(f"  Gamepad layout override has duplicate buttons ({', '.join(duplicates)}).")
+        print("  Re-run: python gamepad_debug.py --calibrate")
+    return layout
+
+
+def _apply_layout_override(profile: dict, layout: dict) -> dict:
+    mapped = copy.deepcopy(profile)
+    buttons = {str(k): int(v) for k, v in layout["buttons"].items()}
+    mapped["buttons"] = buttons
+    if isinstance(layout.get("axis_deadzone"), dict):
+        mapped["axis_deadzone"] = {
+            int(axis): float(deadzone)
+            for axis, deadzone in layout["axis_deadzone"].items()
+        }
+    if isinstance(layout.get("axis_calibration"), dict):
+        mapped["axis_calibration"] = {
+            int(axis): {
+                str(k): float(v)
+                for k, v in calib.items()
+            }
+            for axis, calib in layout["axis_calibration"].items()
+            if isinstance(calib, dict)
+        }
+
+    face = {}
+    for label in ("B", "A", "Y", "X"):
+        if label in buttons:
+            face[buttons[label]] = label
+    if face:
+        mapped["face"] = face
+
+    shoulder = {}
+    for label in ("L", "R", "ZL", "ZR"):
+        if label in buttons:
+            shoulder[label] = buttons[label]
+    if shoulder:
+        mapped["shoulder"] = {**mapped["shoulder"], **shoulder}
+
+    return mapped
+
+
 def detect_profile(joystick) -> dict:
     name = joystick.get_name().lower()
+    selected_key = "generic"
+    selected_profile = CONTROLLER_PROFILES["generic"]
     for key, profile in CONTROLLER_PROFILES.items():
         if any(p in name for p in profile["patterns"]):
-            print(f"  Controller: '{joystick.get_name()}' → {key} profile")
-            return profile
-    print(f"  Controller: '{joystick.get_name()}' → generic profile")
-    return CONTROLLER_PROFILES["generic"]
+            selected_key = key
+            selected_profile = profile
+            break
+
+    override = _load_layout_override(joystick)
+    if override is not None:
+        mapped = _apply_layout_override(selected_profile, override)
+        print(f"  Controller: '{joystick.get_name()}' → {selected_key} profile + layout override")
+        print(f"  Layout: {layout_path_for(joystick)}")
+        return mapped
+
+    print(f"  Controller: '{joystick.get_name()}' → {selected_key} profile")
+    return selected_profile
+
+
+def save_layout_override(joystick, buttons: dict) -> Path:
+    LAYOUT_DIR.mkdir(parents=True, exist_ok=True)
+    path = layout_path_for(joystick)
+    previous = {}
+    if path.exists():
+        try:
+            with path.open() as f:
+                previous = json.load(f)
+        except Exception:
+            previous = {}
+    payload = {
+        "name": joystick.get_name(),
+        "guid": joystick_guid(joystick),
+        "buttons": {str(k): int(v) for k, v in buttons.items()},
+    }
+    if isinstance(previous.get("axis_deadzone"), dict):
+        payload["axis_deadzone"] = previous["axis_deadzone"]
+    if isinstance(previous.get("axis_calibration"), dict):
+        payload["axis_calibration"] = previous["axis_calibration"]
+    with path.open("w") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.write("\n")
+    return path
+
+
+def save_axis_calibration(joystick, axis_calibration: dict) -> Path:
+    LAYOUT_DIR.mkdir(parents=True, exist_ok=True)
+    path = layout_path_for(joystick)
+    payload = {}
+    if path.exists():
+        try:
+            with path.open() as f:
+                payload = json.load(f)
+        except Exception:
+            payload = {}
+    payload.setdefault("name", joystick.get_name())
+    payload.setdefault("guid", joystick_guid(joystick))
+    payload.setdefault("buttons", {})
+    payload["axis_calibration"] = {
+        str(axis): {str(k): float(v) for k, v in calib.items()}
+        for axis, calib in axis_calibration.items()
+    }
+    with path.open("w") as f:
+        json.dump(payload, f, indent=2, sort_keys=True)
+        f.write("\n")
+    return path
+
+
+def button_index(profile: dict, label: str) -> int | None:
+    buttons = profile.get("buttons")
+    if isinstance(buttons, dict) and label in buttons:
+        return int(buttons[label])
+    if label in profile.get("shoulder", {}):
+        return int(profile["shoulder"][label])
+    for idx, face_label in profile.get("face", {}).items():
+        if face_label == label:
+            return int(idx)
+    return None
+
+
+def axis_deadzone(profile: dict, axis_index: int) -> float:
+    calibration = profile.get("axis_calibration", {})
+    if axis_index in calibration and "threshold" in calibration[axis_index]:
+        return float(calibration[axis_index]["threshold"])
+    if str(axis_index) in calibration and "threshold" in calibration[str(axis_index)]:
+        return float(calibration[str(axis_index)]["threshold"])
+    deadzones = profile.get("axis_deadzone", {})
+    if axis_index in deadzones:
+        return float(deadzones[axis_index])
+    if str(axis_index) in deadzones:
+        return float(deadzones[str(axis_index)])
+    return DEFAULT_AXIS_DEADZONES.get(axis_index, DEADZONE)
+
+
+def filtered_axis_value(joystick, profile: dict, axis_index: int) -> float:
+    value = joystick.get_axis(axis_index)
+    calibration = profile.get("axis_calibration", {})
+    axis_cal = calibration.get(axis_index, calibration.get(str(axis_index), {}))
+    rest = float(axis_cal.get("rest", 0.0)) if isinstance(axis_cal, dict) else 0.0
+    centered = value - rest
+    if abs(centered) <= axis_deadzone(profile, axis_index):
+        return 0.0
+    return max(-1.0, min(1.0, centered))
 
 
 # ── Joint velocity helpers ─────────────────────────────────────────────────────
 
-def get_joint_deltas(joystick, profile: dict, dt: float) -> dict:
+class ButtonDebouncer:
+    """Require a button to read the same value for `stable` consecutive polls
+    before reporting the change — kills single-frame contact chatter (e.g. a worn
+    ZR firing spuriously). 3 polls ≈ 60 ms at the 50 Hz command tick, below
+    perception but well above bounce."""
+
+    def __init__(self, stable: int = 3):
+        self.stable = stable
+        self._state = {}   # index -> currently reported bool
+        self._count = {}   # index -> consecutive polls the candidate has held
+
+    def __call__(self, index: int, raw: bool) -> bool:
+        reported = self._state.get(index, False)
+        if raw == reported:
+            self._count[index] = 0
+            return reported
+        self._count[index] = self._count.get(index, 0) + 1
+        if self._count[index] >= self.stable:
+            self._state[index] = raw
+            self._count[index] = 0
+            return raw
+        return reported
+
+
+def get_joint_deltas(joystick, profile: dict, dt: float, debounce: "ButtonDebouncer | None" = None) -> dict:
     """Per-tick goal increments: expo stick × JOINT_SPEED (deg/s) × dt (tick length).
-    dt is required — every caller states its own tick so speeds stay in deg/s."""
+    dt is required — every caller states its own tick so speeds stay in deg/s.
+    Pass a ButtonDebouncer to reject single-frame button chatter."""
     def axis(i):
-        v = joystick.get_axis(i)
-        if abs(v) <= DEADZONE:
-            return 0.0
+        v = filtered_axis_value(joystick, profile, i)
         return v * abs(v)       # expo: fine control near centre, full speed at the edge
 
     def btn(i):
-        try:    return joystick.get_button(i)
-        except: return False
+        try:    v = bool(joystick.get_button(i))
+        except: return 0
+        if debounce is not None:
+            v = debounce(i, v)
+        return int(v)
 
     lx = axis(0); ly = axis(1)
     rx = axis(2); ry = axis(3)
@@ -257,8 +473,10 @@ def draw_controller(surf, joystick, profile: dict,
                     shoulder_col_x: int, face_center: tuple):
     """Draw sticks, shoulder buttons, and face buttons in standard layout."""
     try:
-        lx = joystick.get_axis(0); ly = joystick.get_axis(1)
-        rx = joystick.get_axis(2); ry = joystick.get_axis(3)
+        lx = filtered_axis_value(joystick, profile, 0)
+        ly = filtered_axis_value(joystick, profile, 1)
+        rx = filtered_axis_value(joystick, profile, 2)
+        ry = filtered_axis_value(joystick, profile, 3)
     except Exception:
         lx = ly = rx = ry = 0.0
 

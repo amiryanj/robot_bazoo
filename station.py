@@ -52,7 +52,7 @@ from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
 from gamepad_utils import (
     MOTOR_NAMES, JOINT_LIMITS,
     detect_profile, get_joint_deltas, apply_deltas, is_neutral,
-    graceful_shutdown, DeltaSmoother,
+    graceful_shutdown, DeltaSmoother, ButtonDebouncer,
 )
 
 PORT     = "/dev/ttyACM1"  # CH343 arm controller (ESP32-C3 IMU takes ttyACM0)
@@ -490,6 +490,7 @@ def main():
     pygame.init()
     jm = JoystickManager()
     smoother = DeltaSmoother(alpha=0.15)   # per-tick EMA; τ≈0.13 s at the 50 Hz command tick
+    debouncer = ButtonDebouncer()          # reject single-frame button chatter (worn ZR)
 
     # ── Twin (lazy import) ──────────────────────────────────────────────────────
     twin = mj_model = mj_data = None
@@ -547,7 +548,7 @@ def main():
 
             # ── joystick → action ────────────────────────────────────────────────
             if jm.connected and not args.observe:
-                deltas = smoother(get_joint_deltas(jm.joystick, jm.profile, dt))
+                deltas = smoother(get_joint_deltas(jm.joystick, jm.profile, dt, debounce=debouncer))
                 if not is_neutral(deltas):
                     goal_pos = apply_deltas(goal_pos, deltas)
                     robot.send_action({f"{n}.pos": goal_pos[n] for n in MOTOR_NAMES})

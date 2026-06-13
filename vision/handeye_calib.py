@@ -298,7 +298,7 @@ def main():
     from lerobot.robots.so_follower import SOFollower
     from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
     from gamepad_utils import (get_joint_deltas, apply_deltas, detect_profile,
-                               graceful_shutdown, DeltaSmoother)
+                               graceful_shutdown, DeltaSmoother, ButtonDebouncer)
 
     import torch
     fk = make_fk()
@@ -323,6 +323,7 @@ def main():
     pygame.init()
     joystick = None
     smoother = DeltaSmoother(alpha=0.45)
+    debouncer = ButtonDebouncer()          # gripper must stay fixed — reject ZR chatter
     obs = robot.get_observation()
     goal = {n: obs.get(f"{n}.pos", 0.0) for n in MOTOR_NAMES}
 
@@ -353,7 +354,7 @@ def main():
                     joystick = None
 
             if joystick is not None:
-                deltas = smoother(get_joint_deltas(joystick, profile, dt=0.03))
+                deltas = smoother(get_joint_deltas(joystick, profile, dt=0.03, debounce=debouncer))
                 goal = apply_deltas(goal, deltas)
                 robot.send_action({f"{n}.pos": goal[n] for n in MOTOR_NAMES})
 
