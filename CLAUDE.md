@@ -79,7 +79,7 @@ These are the rules that keep a fresh session from breaking things:
 - **Don't re-run `lerobot-setup-motors`** (motor IDs 1–6 are assigned) and don't
   recalibrate unless the calibration file is missing — both are already done.
 - **The servo-gain fix in `configure()` is load-bearing — do not revert it.** The
-  patched `so_follower.py` applies per-motor gains from `outputs/tuning/gains.json`
+  patched `so_follower.py` applies per-motor gains from `config/gains.json`
   on every connect (currently P=32 I=0 **D=200** on shoulder_pan/lift/elbow — tuned
   2026-06-11 against wrist-IMU ringing; default P=32 I=0 D=32 elsewhere). Stock
   lerobot wrote P=16, which left the arm unable to lift against gravity. Lives in
@@ -273,14 +273,14 @@ with zero motion at any gains — don't chase it with PID).
 ## Local lerobot patches
 
 `patches/lerobot_local.patch` holds two edits to the gitignored `lerobot/` install:
-1. `so_follower.py`: per-motor P/I/D loaded from `outputs/tuning/gains.json` on connect
+1. `so_follower.py`: per-motor P/I/D loaded from `config/gains.json` on connect
    (default P=32 I=0 D=32 — P must stay 32 for lift torque) + per-camera fault-tolerant
    connect.
 2. `camera_realsense.py`: read-loop `stop_event` fix.
 
 Reapply after a fresh lerobot clone: `git -C lerobot apply ../patches/lerobot_local.patch`.
-`gains.json` sits under the gitignored `outputs/` — it is force-added (`git add -f`)
-so it survives a re-clone; edit it (not EEPROM) to change standing gains.
+`gains.json` lives in the tracked `config/` dir (alongside the gamepad layout
+override) — edit it (not EEPROM) to change standing gains.
 
 ## Status & TODO
 

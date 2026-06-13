@@ -70,7 +70,7 @@ CONTROLLER_PROFILES = {
 }
 
 
-LAYOUT_DIR = Path(__file__).resolve().parent / "outputs" / "gamepad_layouts"
+LAYOUT_DIR = Path(__file__).resolve().parent / "config"
 
 
 def _safe_layout_id(text: str) -> str:

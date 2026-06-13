@@ -19,7 +19,7 @@ data collection, and a controller-tuning toolkit for the Feetech STS3215 servos.
 
 The PID loops run **onboard each servo** (the laptop is never inside them) — host scripts
 stream goal positions and read telemetry. Gains are not trusted to EEPROM: the patched
-lerobot `configure()` re-applies `outputs/tuning/gains.json` on every connect.
+lerobot `configure()` re-applies `config/gains.json` on every connect.
 
 ```mermaid
 flowchart LR
@@ -67,7 +67,7 @@ flowchart TD
 
     subgraph extern["External + config"]
         lr["lerobot 0.4.5 (patched)<br/>SOFollower, cameras"]
-        gj["outputs/tuning/gains.json<br/>single source of servo gains,<br/>applied on every connect"]
+        gj["config/gains.json<br/>single source of servo gains,<br/>applied on every connect"]
         mj["MuJoCo SO-101 scene<br/>(SO-ARM100, digital twin / FK)"]
     end
 
@@ -89,7 +89,7 @@ git -C lerobot apply ../patches/lerobot_local.patch   # P-gain + camera fixes (s
 ```
 
 `lerobot/` and `SO-ARM100/` are external repos and aren't tracked here — clone them yourself.
-The patch makes `configure()` apply per-motor gains from `outputs/tuning/gains.json` on every
+The patch makes `configure()` apply per-motor gains from `config/gains.json` on every
 connect (default P=32 so the arm holds against gravity) and makes camera connect/read
 fault-tolerant.
 
@@ -111,6 +111,7 @@ Everything written down in this repo, from here:
 |---|---|
 | `station.py` | **Main entry point.** Gamepad teleop + typed commands while motors, the wrist IMU, the controller, and (opt) cameras stream to one Rerun window + CSV. Flags: `--observe` (read-only), `--health`, `--cameras`, `--twin`, `--no-imu`, `--no-log`. |
 | `pick_ball.py` | Scripted ball pick (WIP): student-YOLO detection → sphere-fit 3-D → IK → staged grasp; `--dry-run`, `--watch`, `--selftest`, MuJoCo twin preview |
+| `gamepad_debug.py` | Robot-free pygame joystick debugger: raw axes/buttons/hats + SO-101 joint-command mapping |
 | `gamepad_utils.py` | Shared controller profiles, smoothing, graceful shutdown |
 | `sim_collect.py` | Collect episodes in MuJoCo as a LeRobot dataset |
 | `servo_tuning.py` | Tuning toolbox: PID r/w, trajectories, step/FRF analysis |
@@ -124,6 +125,7 @@ Everything written down in this repo, from here:
 ```bash
 python station.py                  # full cockpit: teleop + motors + IMU → Rerun + CSV
 python station.py --observe        # read-only telemetry (safe, no motion)
+python gamepad_debug.py            # joystick-only debug; no robot/MuJoCo/Rerun
 python calibrate.py autotune --joint shoulder_pan --size 25 --trials 40
 ```
 
