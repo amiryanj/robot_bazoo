@@ -51,8 +51,8 @@ from lerobot.robots.so_follower import SOFollower
 from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
 
 from gamepad_utils import (
-    MOTOR_NAMES, JOINT_LIMITS,
-    detect_profile, get_joint_deltas, apply_deltas, is_neutral,
+    MOTOR_NAMES, JOINT_LIMITS, REST_POSE,
+    detect_profile, get_joint_deltas, apply_deltas, is_neutral, button_index,
     graceful_shutdown, DeltaSmoother, ButtonDebouncer,
 )
 
@@ -354,7 +354,9 @@ def make_robot_config(args):
     if args.cameras:
         from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig
         from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig
-        if not args.no_realsense:
+        # --vision owns the top-down realsense directly (color+depth for the pick); don't
+        # also let lerobot grab it here or the device is busy.
+        if not args.no_realsense and not args.vision:
             cameras["realsense"] = RealSenseCameraConfig(
                 serial_number_or_name="117222251972", fps=15, width=640, height=480)
         if not args.no_wrist:
@@ -406,6 +408,9 @@ def main():
     parser.add_argument("--detect-ball", action="store_true",
                         help="With --cameras, run YOLO ball detection on the realsense feed (2-D box in Rerun).")
     parser.add_argument("--twin", action="store_true", help="Launch the MuJoCo 3-D twin viewer.")
+    parser.add_argument("--vision", action="store_true",
+                        help="Open the top-down realsense for the scripted pick: press X to "
+                             "grab the ball, Home to stop (Home again when idle -> rest pose).")
     parser.add_argument("--serve", action="store_true",
                         help="Serve the Rerun web viewer on 0.0.0.0:9090 (open from another LAN machine's browser) "
                              "instead of the native local window.")
@@ -472,6 +477,23 @@ def main():
         except Exception as e:
             print(f"  Ball detector unavailable ({e}); continuing without detection.")
             detector = None
+
+    # ── Vision / scripted pick (optional) ───────────────────────────────────────
+    # Opens the top-down realsense (color+depth) once and holds it; X triggers a pick.
+    vcam = vdet = vkin = run_grasp = None
+    if args.vision:
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent / "vision"))
+            from handeye_calib import Realsense
+            from pick_ball import BallDetector, Kin, run_grasp, move_to, read_angles
+            print("Vision: opening top-down realsense + loading detector...")
+            vcam = Realsense()
+            vdet = BallDetector()
+            vkin = Kin()
+            print("Vision ready — press X to pick, Home to stop / return to rest.")
+        except Exception as e:
+            print(f"  Vision unavailable ({e}); continuing without the pick.")
+            vcam = vdet = vkin = run_grasp = None
 
     # ── Rerun (auto-opens a viewer with a default layout) ───────────────────────
     rr.init("so101_station")
@@ -551,6 +573,7 @@ def main():
     last_input_t = time.perf_counter()  # last teleop input; drives the idle limp on shoulder_pan
     pan_limp = False                    # True while shoulder_pan torque is released for idle
     error_counts = {n: 0 for n in MOTOR_NAMES}
+    prev_x = prev_home = False             # rising-edge state for the pick / rest buttons
     writer = None
     csv_f = None
     if csv_path:
@@ -601,6 +624,37 @@ def main():
                     goal_pos = apply_deltas(goal_pos, deltas)
                     robot.send_action({f"{n}.pos": goal_pos[n] for n in MOTOR_NAMES})
                     last_input_t = loop_start
+
+            # ── X = pick, Home = stop / return to rest (vision mode) ─────────────
+            if run_grasp is not None and jm.connected and not args.observe:
+                js = jm.joystick
+                xi = button_index(jm.profile, "X")
+                hi = button_index(jm.profile, "Home")
+                xi = 3 if xi is None else xi              # Nintendo defaults if unmapped
+                hi = 12 if hi is None else hi
+                x_now = bool(js.get_button(xi)) if js.get_numbuttons() > xi else False
+                home_now = bool(js.get_button(hi)) if js.get_numbuttons() > hi else False
+                if x_now and not prev_x:
+                    if pan_limp:
+                        bus.enable_torque("shoulder_pan"); pan_limp = False
+                    print("\n[X] pick requested — teleop paused")
+                    status = run_grasp(robot, vcam, vdet, vkin, twin=None,
+                                       should_abort=lambda: (pygame.event.pump(),
+                                                             bool(js.get_button(hi)))[1])
+                    print(f"[pick] {status}")
+                    goal_pos = read_angles(robot)         # resync to where the arm ended
+                    pygame.event.pump()
+                    prev_x = bool(js.get_button(xi)); prev_home = bool(js.get_button(hi))
+                    last_input_t = time.perf_counter()
+                    continue
+                if home_now and not prev_home:
+                    if pan_limp:
+                        bus.enable_torque("shoulder_pan"); pan_limp = False
+                    print("\n[Home] returning to rest pose")
+                    move_to(robot, read_angles(robot), dict(REST_POSE), seconds=2.5)
+                    goal_pos = dict(REST_POSE)
+                    last_input_t = time.perf_counter()
+                prev_x, prev_home = x_now, home_now
 
             # ── idle → release shoulder_pan torque (stops setpoint hunting) ──────
             if not args.observe and not pan_limp and loop_start - last_input_t > IDLE_LIMP_S:
@@ -705,6 +759,11 @@ def main():
         detect_stop.set()
         if detect_t:
             detect_t.join(timeout=1.0)
+        if vcam is not None:
+            try:
+                vcam.stop()
+            except Exception:
+                pass
         if twin:
             twin.close()
         # Ctrl-C can fire mid serial transaction, leaving the port handler's "in use"

@@ -340,9 +340,10 @@ class BallDetector:
         return self._gdino_detect(color_bgr, thr)
 
 
-def localize_base(detector=None):
+def localize_base(detector=None, cam=None):
     """Grab a frame, detect the ball, return (p_base, info dict). Always saves the
-    frame + detection overlay to outputs/vision/pick_<ts>/ for debugging."""
+    frame + detection overlay to outputs/vision/pick_<ts>/ for debugging. Pass `cam` to
+    reuse an already-open Realsense (station shares one); otherwise opens+closes its own."""
     import cv2
     from datetime import datetime
     from ball import WORKSPACE_Z
@@ -355,11 +356,14 @@ def localize_base(detector=None):
     R_cb, t_cb = np.array(he["R"]), np.array(he["t"])
 
     detector = detector or BallDetector()
-    cam = Realsense()
+    own_cam = cam is None                                  # station passes a shared camera
+    if own_cam:
+        cam = Realsense()
     try:
         color, depth, K = cam.grab()
     finally:
-        cam.stop()
+        if own_cam:
+            cam.stop()
 
     box, score = detector.detect(color)
     ball = ball_from_box(box, score, depth, K) if box else None
@@ -487,10 +491,13 @@ def read_angles(robot):
     return {n: obs.get(f"{n}.pos", 0.0) for n in MOTOR_NAMES}
 
 
-def move_to(robot, start, goal, seconds=MOVE_SECONDS, twin=None):
-    """Slow linear joint-space interpolation start -> goal."""
+def move_to(robot, start, goal, seconds=MOVE_SECONDS, twin=None, should_abort=None):
+    """Slow linear joint-space interpolation start -> goal. If should_abort() goes True
+    mid-move (e.g. the Home button), stop immediately and return the current pose."""
     steps = max(int(seconds * RATE), 1)
     for i in range(1, steps + 1):
+        if should_abort is not None and should_abort():
+            return read_angles(robot)
         a = i / steps
         cmd = {n: start[n] + a * (goal[n] - start[n]) for n in MOTOR_NAMES}
         robot.send_action({f"{n}.pos": cmd[n] for n in MOTOR_NAMES})
@@ -525,6 +532,58 @@ def close_on_ball(robot, pose, twin=None):
         twin.set(cmd)
     print(f"  no clear contact; holding partial close at {GRIP_GRASP:.0f}; trace {trace}")
     return cmd
+
+
+# ── One pick cycle, for an already-connected robot (station calls this on a button) ────
+
+def run_grasp(robot, cam, detector, kin, twin=None, should_abort=None):
+    """Localize -> plan -> side grasp -> lift -> place back -> release -> retract, using an
+    ALREADY-connected robot and an open shared camera. Does NOT connect/land the robot —
+    the caller owns that. Polls should_abort() between (and during) moves and bails,
+    holding where it is. Returns a short status string for the caller to print."""
+    sa = should_abort or (lambda: False)
+    p_base, ball = localize_base(detector, cam=cam)
+    if p_base is None:
+        return "no ball detected"
+    if not ball["fit_ok"]:
+        return "sphere fit failed — not trustworthy, not grasping"
+    if not (BALL_X[0] <= p_base[0] <= BALL_X[1] and BALL_Y[0] <= p_base[1] <= BALL_Y[1]
+            and BALL_Z[0] <= p_base[2] <= BALL_Z[1]):
+        return f"ball out of bounds {np.round(p_base * 1000).astype(int)} mm"
+    high, above, grasp, e_g, tilt, e_a = plan_waypoints(kin, np.asarray(p_base, float),
+                                                        ball["radius_m"])
+    print(f"  ball {np.round(p_base * 1000).astype(int)}mm  grasp_err={e_g * 1000:.1f}mm  "
+          f"tilt={tilt:.0f}deg")
+    if e_g > 0.008 or tilt > 30 or e_a > 0.05:
+        return "IK did not converge — out of reach"
+    for w in (high, above, grasp):
+        w["gripper"] = GRIP_OPEN
+    if twin is not None:
+        try:
+            twin.set(grasp)
+        except Exception:
+            pass
+
+    cur = read_angles(robot)
+    for label, wp, secs in (("raise", high, MOVE_SECONDS), ("beside", above, MOVE_SECONDS),
+                            ("move in", grasp, 2.0)):
+        if sa():
+            return "aborted"
+        print(f"  {label}")
+        cur = move_to(robot, cur, wp, seconds=secs, twin=twin, should_abort=sa)
+    if sa():
+        return "aborted"
+    print("  close"); cur = close_on_ball(robot, cur, twin=twin)
+    lift = dict(cur); lift.update({k: high[k] for k in ARM_JOINTS})
+    print("  lift"); cur = move_to(robot, cur, lift, seconds=2.0, twin=twin, should_abort=sa)
+    time.sleep(0.8)
+    down = dict(cur); down.update({k: grasp[k] for k in ARM_JOINTS})
+    print("  place back"); cur = move_to(robot, cur, down, seconds=2.0, twin=twin, should_abort=sa)
+    rel = dict(cur); rel["gripper"] = GRIP_OPEN
+    print("  release"); cur = move_to(robot, cur, rel, seconds=1.0, twin=twin, should_abort=sa)
+    move_to(robot, cur, dict(cur, **{k: high[k] for k in ARM_JOINTS}),
+            seconds=1.5, twin=twin, should_abort=sa)              # retract to safe height
+    return "aborted" if sa() else "done"
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────────────
