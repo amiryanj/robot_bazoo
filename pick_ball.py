@@ -175,10 +175,12 @@ class Kin:
 
     def gap_center_offset(self, radius):
         """Where a ball of this radius sits CENTRED between the two fingers, expressed in
-        the gripper frame (offset from the TCP site). Found by sweeping ball positions in
-        the finger pocket (gripper at GRIP_OPEN) and keeping the one with equal, positive
-        clearance to both fingers (centred, no penetration). Pose-independent (the fingers
-        are rigid to the gripper), so computed at a canonical pose and cached per radius."""
+        the gripper frame (offset from the TCP site). Only the JAW-OPENING axis (gripper z)
+        and the APPROACH depth (gripper x) are searched; the vertical (gripper y) is held
+        at 0 ON PURPOSE — the grasp height must stay at the ball's equator (the perceived
+        ball centre), NOT be re-centred between the fingers vertically. Found by sweeping
+        ball positions in the pocket (gripper at GRIP_OPEN) and keeping the one with equal,
+        positive clearance to both fingers. Pose-independent, cached per radius."""
         key = round(float(radius), 4)
         if key in self._gap_cache:
             return self._gap_cache[key]
@@ -191,19 +193,18 @@ class Kin:
         R = d.site_xmat[self.s_sid].reshape(3, 3)
         tcp = d.site_xpos[self.s_sid]
         best = None
-        for dx in np.linspace(-0.075, -0.01, 12):
-            for dy in np.linspace(-0.015, 0.04, 10):
-                for dz in np.linspace(-0.01, 0.07, 14):
-                    off = np.array([dx, dy, dz])
-                    d.mocap_pos[0] = tcp + R @ off
-                    mj.mj_forward(m, d)
-                    df = min(mj.mj_geomDistance(m, d, self.s_ballg, g, 0.5, None) for g in self.s_fixed)
-                    dm = min(mj.mj_geomDistance(m, d, self.s_ballg, g, 0.5, None) for g in self.s_moving)
-                    if df < 0.003 or dm < 0.003:              # must clear BOTH fingers
-                        continue
-                    score = abs(df - dm) + 0.5 * (df + dm)    # centred + snug in the pocket
-                    if best is None or score < best[0]:
-                        best = (score, off)
+        for dx in np.linspace(-0.075, -0.01, 14):
+            for dz in np.linspace(-0.01, 0.08, 19):
+                off = np.array([dx, 0.0, dz])                 # dy=0: keep grasp at equator
+                d.mocap_pos[0] = tcp + R @ off
+                mj.mj_forward(m, d)
+                df = min(mj.mj_geomDistance(m, d, self.s_ballg, g, 0.5, None) for g in self.s_fixed)
+                dm = min(mj.mj_geomDistance(m, d, self.s_ballg, g, 0.5, None) for g in self.s_moving)
+                if df < 0.003 or dm < 0.003:                  # must clear BOTH fingers
+                    continue
+                score = abs(df - dm) + 0.5 * (df + dm)        # centred + snug in the pocket
+                if best is None or score < best[0]:
+                    best = (score, off)
         off = best[1] if best else np.zeros(3)
         self._gap_cache[key] = off
         return off
