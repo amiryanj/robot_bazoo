@@ -209,9 +209,9 @@ SmolVLA training+inference; big-VLA (7B) training needs the cloud.
   FK-predicted) vs the live desk tag (magenta, `DICT_4X4_50` id 13), plus the workspace
   point cloud (Rerun) and the fitted plane. Use it first whenever localization looks wrong.
 - `vision/autolabel.py` / `vision/detector_bench.py` / `vision/collect_marker_data.py` —
-  the detector pipeline (see `vision/DETECTOR.md`): GDINO-teacher auto-labeling, the
-  student-vs-teacher benchmark, and a bounded autonomous arm session that captures the
-  finger hearts in varied in-air poses (FK-filtered clear-air box, graceful landing).
+  the detector pipeline (see `vision/DETECTOR.md`): GDINO-teacher auto-labeling and the
+  student-vs-teacher benchmark. **Now ball-only** — the old `heart_pink` class is retired
+  (the gripper marker is AprilTags, detected by ArUco, not a trained YOLO).
   Student weights: `vision/models/scene_yolov8n.pt` (ball 7/7 vs teacher, 11 ms warm).
 
 **Analysis:**
@@ -311,11 +311,8 @@ override) — edit it (not EEPROM) to change standing gains.
       (`vision/detector_bench.py`). Dataset 45 frames / 204 augmented under
       `outputs/vision/dataset_2026-06-11/`. See `vision/DETECTOR.md`. v1 is
       single-scene — collect varied data with Javad before trusting it broadly.
-      `pick_ball.py` now uses the student first (11 ms) with GDINO fallback.
-      **Hearts still data-starved** (19 instances): the overnight collection session
-      ran cleanly but the room lights were off → frames black → rerun
-      `vision/collect_marker_data.py` in daylight, autolabel (QC: heart label must
-      sit near the FK-projected gripper pixel), retrain.
+      `pick_ball.py` now uses the student first (11 ms) with GDINO fallback. The pipeline
+      is **ball-only now** — the `heart_pink` class is retired (gripper marker is AprilTags).
 - [x] **Pick choreography validated in sim (2026-06-11 night)** — full sequence
       (plan → above → descend → contact-close → lift → replace → land) ran against
       `sim_backend.SimRobot`: plan 0.4 mm, sim TCP tracks within ~7 mm. Only physical

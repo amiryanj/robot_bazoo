@@ -1,3 +1,9 @@
+> **UPDATE (2026-06-14): ball-only now.** The `heart_pink` class and the heart-detection
+> path are retired — the gripper marker is AprilTags (finger ids 1,2), detected by ArUco,
+> not a trained YOLO. `autolabel.py`/`detector_bench.py` are single-class (ball) and use a
+> plain GDINO wrapper (`autolabel.Gdino`), not the deleted `HeartDetector`. The history
+> below (2-class, heart augmentation, etc.) is kept for context.
+
 # Scene detector: fast YOLO student, GDINO teacher
 
 **Goal:** detect + localize *our* objects (mini basketball, heart markers) in 3D, with a

@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Benchmark the fast student (yolov8n fine-tune) against the slow teacher (GDINO).
 
-For every val frame: GDINO boxes (ball via "basketball.", pink heart via the gated
-"heart." pipeline) are the reference; report the student's per-class agreement
-(hit = IoU>0.5 with the reference box) and the speed of both on this machine.
+For every val frame: GDINO "basketball." boxes are the reference; report the student's
+per-class agreement (hit = IoU>0.5 with the reference box) and the speed of both on this
+machine. Single class: the ball (the heart_pink class is gone — gripper marker is AprilTags).
 
     python vision/detector_bench.py <weights.pt> <val_images_dir>
 """
@@ -15,10 +15,9 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from autolabel import label_frame  # noqa: E402  (GDINO reference labeling)
-from handeye_calib import HeartDetector  # noqa: E402
+from autolabel import Gdino, label_frame  # noqa: E402  (GDINO reference labeling)
 
-CLASSES = ["ball", "heart_pink"]
+CLASSES = ["ball"]
 
 
 def iou(a, b):
@@ -38,11 +37,11 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     student = YOLO(weights)
-    teacher = HeartDetector(device)
+    teacher = Gdino(device)
     frames = sorted(val_dir.glob("*.png"))
     print(f"{len(frames)} frames, device={device}\n")
 
-    hits = {c: [0, 0] for c in range(2)}                 # cls -> [agree, ref_total]
+    hits = {c: [0, 0] for c in range(len(CLASSES))}      # cls -> [agree, ref_total]
     fp = 0
     t_s = t_t = 0.0
     for fpth in frames:

@@ -1,14 +1,12 @@
 #!/usr/bin/env python
 """Auto-label scene frames with Grounding DINO -> YOLO-format dataset.
 
-GDINO is the slow-but-trusted teacher (validated on this scene: ball 0.75+, hearts
-boxed reliably); the goal is a fast yolov8n student for the real-time loop.
+GDINO is the slow-but-trusted teacher (validated on this scene: ball 0.75+); the goal is
+a fast yolov8n student for the real-time loop. Single class now: the ball (the old
+heart_pink class is gone — the gripper marker is AprilTags, detected by ArUco, not YOLO).
 
 Classes:
     0 ball         GDINO "basketball." best box
-    1 heart_pink   GDINO "heart." boxes gated by the pink wrap-around band
-                   (same gates as handeye_calib — yellow heart excluded for now:
-                   it collides with the guitar pick / wood tones, needs human QC)
 
 Usage:
     python vision/autolabel.py <frames_dir> <out_dir>   # writes images/ labels/ overlays/
@@ -22,10 +20,21 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from handeye_calib import HeartDetector  # noqa: E402  (pink gates live there)
-import handeye_calib  # noqa: E402
 
 BALL_THR = 0.35
+GDINO_ID = "IDEA-Research/grounding-dino-tiny"
+
+
+class Gdino:
+    """Minimal Grounding DINO teacher (zero-shot boxes for a text prompt)."""
+
+    def __init__(self, device):
+        import torch
+        from transformers import AutoModelForZeroShotObjectDetection, AutoProcessor
+        self.torch = torch
+        self.device = device
+        self.proc = AutoProcessor.from_pretrained(GDINO_ID)
+        self.model = AutoModelForZeroShotObjectDetection.from_pretrained(GDINO_ID).to(device).eval()
 
 
 def gdino_boxes(det, color_bgr, prompt, thr):
@@ -41,10 +50,8 @@ def gdino_boxes(det, color_bgr, prompt, thr):
             for b, s in zip(res["boxes"].tolist(), res["scores"].tolist())]
 
 
-def label_frame(det, color, gripper_uv=None, gate_px=90):
-    """Return list of (cls, x1,y1,x2,y2). If gripper_uv (the FK-projected gripper
-    pixel) is given, a heart label must sit within gate_px of it — kinematics-backed
-    QC that kills color false-positives (the red clamp incident)."""
+def label_frame(det, color):
+    """Return list of (cls, x1,y1,x2,y2) — ball only (class 0)."""
     H, W = color.shape[:2]
     out = []
     balls = gdino_boxes(det, color, "basketball.", BALL_THR)
@@ -52,32 +59,7 @@ def label_frame(det, color, gripper_uv=None, gate_px=90):
         (x1, y1, x2, y2), s = max(balls, key=lambda b: b[1])
         if max(x2 - x1, y2 - y1) < 0.4 * W:               # reject whole-table boxes
             out.append((0, x1, y1, x2, y2))
-    uv, boxes = det.marker_uv(color)                       # hearts + pink gating
-    if uv is not None:
-        if gripper_uv is not None and np.hypot(uv[0] - gripper_uv[0],
-                                               uv[1] - gripper_uv[1]) > gate_px:
-            return out                                     # heart far from gripper: junk
-        for (x1, y1, x2, y2), conf, px, frac in boxes:
-            if ((x1 + x2) // 2, (y1 + y2) // 2) == uv:
-                out.append((1, x1, y1, x2, y2))
-                break
     return out
-
-
-def fk_gripper_uv(joints, K):
-    """Project the FK gripper position into the image via the hand-eye transform."""
-    import json
-    from handeye_calib import make_fk
-    he = json.load(open(Path(__file__).resolve().parent.parent / "outputs/calib/handeye.json"))
-    R_cb, t_cb = np.array(he["R"]), np.array(he["t"])
-    if not hasattr(fk_gripper_uv, "_fk"):
-        fk_gripper_uv._fk = make_fk()
-    _, t_w = fk_gripper_uv._fk(joints)
-    p_cam = R_cb.T @ (t_w - t_cb)                          # base -> camera frame
-    if p_cam[2] <= 0.05:
-        return None
-    return (int(K["fx"] * p_cam[0] / p_cam[2] + K["ppx"]),
-            int(K["fy"] * p_cam[1] / p_cam[2] + K["ppy"]))
 
 
 def main():
@@ -85,22 +67,16 @@ def main():
     for sub in ("images", "labels", "overlays"):
         (dst / sub).mkdir(parents=True, exist_ok=True)
     import torch
-    det = HeartDetector("cuda" if torch.cuda.is_available() else "cpu")
+    det = Gdino("cuda" if torch.cuda.is_available() else "cpu")
     frames = sorted(p for p in src.rglob("*.png")
                     if not any(t in p.name for t in ("overlay", "_det", "depth")))
-    n_ball = n_heart = 0
+    n_ball = 0
     for i, fp in enumerate(frames):
         color = cv2.imread(str(fp))
         if color is None:
             continue
         H, W = color.shape[:2]
-        guv = None
-        jf = fp.parent / fp.name.replace("frame_", "joints_").replace(".png", ".json")
-        if jf.exists():                                    # collect_marker_data session
-            import json as _json
-            meta = _json.load(open(jf))
-            guv = fk_gripper_uv(meta["joints"], meta["K"])
-        anns = label_frame(det, color, gripper_uv=guv)
+        anns = label_frame(det, color)
         name = f"{i:03d}_{fp.stem}"
         cv2.imwrite(str(dst / "images" / f"{name}.png"), color)
         with open(dst / "labels" / f"{name}.txt", "w") as f:
@@ -110,15 +86,13 @@ def main():
                 f.write(f"{cls} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}\n")
         vis = color.copy()
         for cls, x1, y1, x2, y2 in anns:
-            col = (0, 165, 255) if cls == 0 else (255, 0, 255)
-            cv2.rectangle(vis, (x1, y1), (x2, y2), col, 2)
-            cv2.putText(vis, ["ball", "heart_pink"][cls], (x1, y1 - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1)
+            cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 165, 255), 2)
+            cv2.putText(vis, "ball", (x1, y1 - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1)
         cv2.imwrite(str(dst / "overlays" / f"{name}.png"), vis)
-        n_ball += sum(1 for a in anns if a[0] == 0)
-        n_heart += sum(1 for a in anns if a[0] == 1)
+        n_ball += len(anns)
         print(f"{name}: {len(anns)} labels")
-    print(f"\n{len(frames)} frames: {n_ball} ball, {n_heart} heart_pink -> {dst}")
+    print(f"\n{len(frames)} frames: {n_ball} ball -> {dst}")
     print("Spot-check overlays/ before training.")
 
 
