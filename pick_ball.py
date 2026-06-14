@@ -64,13 +64,10 @@ BALL_Y = (-0.30, 0.30)
 BALL_Z = (-0.02, 0.12)
 
 APPROACH_CLEAR = 0.05      # pre-grasp clearance back along the fingers (m)
-GRASP_DEPTH = 0.014        # target BELOW ball centre: the TCP site is at the fingertip
-                           # plane, so aiming at the centre leaves the jaws on the top
-                           # hemisphere -> ball squirts out (2x "closed without contact",
-                           # 2026-06-12). Tips go to equator-14mm; spool top stays ~10mm
-                           # below the tips at the measured geometry.
 LIFT_CLEAR = 0.08          # lift height above grasp (m)
 GRIP_OPEN = 95.0           # gripper command while approaching (0=closed, 100=open)
+GRIP_GRASP = 30.0          # partial-close floor: don't fully shut (no crush). Placeholder
+                           # until the close target is sized to the object (radius -> mm).
 MOVE_SECONDS = 2.5         # per segment, linear joint interpolation
 RATE = 20                  # interpolation steps/s
 
@@ -96,6 +93,12 @@ class Kin:
         # axis). Applied here only — IK in/out stays in command space. Without it
         # the planned grasp point is ~11 mm off (missed grasp, 2026-06-12).
         self.roll_delta = ROLL_DELTA_DEG
+        # finger-tag mounts -> the jaw-opening CENTRE (where the ball should sit). We aim
+        # this gap, not the TCP "gripperframe" site (which sits at the fixed finger, +28mm
+        # off the gap laterally — aiming the TCP plants the ball on that finger).
+        tc = json.load(open(TAG_CALIB))
+        self.tag_mounts = [(mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_BODY, t["body"]),
+                            np.array(t["t"])) for t in tc["tags"].values()]
 
     def fk(self, ang_deg):
         for j, a in self.adr.items():
@@ -151,6 +154,12 @@ class Kin:
         R, _ = self.fk(ang)
         return R[:, 0]
 
+    def opening_center(self, ang):
+        """World position of the jaw-opening centre = midpoint of the two finger tags."""
+        self.fk(ang)
+        pts = [self.d.xmat[b].reshape(3, 3) @ t + self.d.xpos[b] for b, t in self.tag_mounts]
+        return np.mean(pts, axis=0)
+
 
 # SIDE approach: fingers level (horizontal) when shoulder_lift + elbow_flex + wrist_flex = 0
 # (model FK). DLS is local, so try several postures along that constraint and keep the best.
@@ -177,9 +186,15 @@ def plan_waypoints(kin, p_base):
       above  — beside the ball at grasp height, backed off APPROACH_CLEAR along the fingers;
       grasp  — the precise grasp pose (only this one needs precision).
     Returns (high, above, grasp, grasp_err_m, axis_err_deg, above_err_m)."""
-    grasp, e_g, tilt = ik_best(kin, p_base)
+    p_base = np.asarray(p_base, float)
+    # rough aim, then re-aim so the JAW-OPENING CENTRE (not the TCP) lands on the ball:
+    grasp0, _, _ = ik_best(kin, p_base)
+    R0, tcp0 = kin.fk(grasp0)
+    g_off = R0.T @ (kin.opening_center(grasp0) - tcp0)    # gap centre in gripper frame
+    tcp_target = p_base - R0 @ g_off                      # so gap centre hits the ball
+    grasp, e_g, tilt = ik_best(kin, tcp_target)
     u = kin.approach_axis(grasp)                          # horizontal, points wrist -> ball
-    p_beside = np.asarray(p_base, float) - APPROACH_CLEAR * u
+    p_beside = tcp_target - APPROACH_CLEAR * u
     above, e_a, _ = kin.ik(p_beside, grasp)
     high, _, _ = kin.ik(p_beside + np.array([0, 0, LIFT_CLEAR]), above)
     return high, above, grasp, e_g, tilt, e_a
@@ -423,11 +438,12 @@ def move_to(robot, start, goal, seconds=MOVE_SECONDS, twin=None):
 
 
 def close_on_ball(robot, pose, twin=None):
-    """Close the gripper in small steps until the measured position stops following
-    the command (contact) or it reaches near-closed. Returns the final command pose."""
+    """Close the gripper in small steps until the jaws stall on the ball (contact) or reach
+    the partial-close floor GRIP_GRASP — NOT fully shut, and no extra squeeze (gentle hold).
+    Object-adaptive sizing is a TODO. Returns the final command pose."""
     cmd = dict(pose)
     trace = []
-    for g in np.arange(pose["gripper"], 2.0, -3.0):
+    for g in np.arange(pose["gripper"], GRIP_GRASP, -3.0):
         cmd["gripper"] = float(g)
         robot.send_action({f"{n}.pos": cmd[n] for n in MOTOR_NAMES})
         if twin:
@@ -436,11 +452,15 @@ def close_on_ball(robot, pose, twin=None):
         meas = read_angles(robot)["gripper"]
         trace.append((round(float(g), 1), round(float(meas), 1)))
         if meas - g > 6.0:                                # jaws stalled on the ball
-            cmd["gripper"] = float(meas - 4.0)            # squeeze a little, not max
+            cmd["gripper"] = float(meas)                  # hold at contact, no squeeze
             robot.send_action({f"{n}.pos": cmd[n] for n in MOTOR_NAMES})
-            print(f"  contact: gripper held at {meas:.0f}, commanding {cmd['gripper']:.0f}")
+            print(f"  contact: gripper held at {meas:.0f} (no squeeze)")
             return cmd
-    print(f"  gripper closed without clear contact; trace (cmd,meas): {trace}")
+    cmd["gripper"] = GRIP_GRASP                           # no hard contact: hold partial
+    robot.send_action({f"{n}.pos": cmd[n] for n in MOTOR_NAMES})
+    if twin:
+        twin.set(cmd)
+    print(f"  no clear contact; holding partial close at {GRIP_GRASP:.0f}; trace {trace}")
     return cmd
 
 
