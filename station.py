@@ -58,6 +58,9 @@ from gamepad_utils import (
 
 PORT     = "/dev/ttyACM1"  # CH343 arm controller (ESP32-C3 IMU takes ttyACM0)
 CMD_RATE_HZ = 50           # teleop command tick; telemetry still polls at --rate
+IDLE_LIMP_S = 1.0          # after this long with no teleop input, release shoulder_pan
+                           # torque so it stops hunting around its setpoint (gravity-neutral
+                           # joint — safe to limp; re-armed on the next input)
 ROBOT_ID = "so101"
 LOG_DIR  = Path("/home/javad/workspace/lerobot_all/outputs/logs")
 SCENE_XML = "/home/javad/workspace/lerobot_all/SO-ARM100/Simulation/SO101/scene.xml"
@@ -188,6 +191,16 @@ class JoystickManager:
     @property
     def connected(self) -> bool:
         return self.joystick is not None
+
+    def close(self) -> None:
+        """Release the device handle so the controller isn't left held open."""
+        if self.joystick is not None:
+            try:
+                self.joystick.quit()
+            except Exception:
+                pass
+            self.joystick = None
+            self.profile = None
 
 # ── IMU thread (ADXL345 on the ESP32-C3) ────────────────────────────────────────
 
@@ -535,6 +548,8 @@ def main():
     poll_dt = 1.0 / args.rate
     last_poll = -1e9
     prev_loop = None
+    last_input_t = time.perf_counter()  # last teleop input; drives the idle limp on shoulder_pan
+    pan_limp = False                    # True while shoulder_pan torque is released for idle
     error_counts = {n: 0 for n in MOTOR_NAMES}
     writer = None
     csv_f = None
@@ -557,19 +572,40 @@ def main():
 
             # ── typed commands ───────────────────────────────────────────────────
             should_exit = False
+            had_command = False
             while not cmd_queue.empty():
+                had_command = True
                 if process_command(cmd_queue.get_nowait(), goal_pos, robot, bus):
                     should_exit = True
                     break
             if should_exit:
                 break
+            if had_command and pan_limp:
+                # a typed command counts as input — re-arm pan so the command takes effect
+                bus.enable_torque("shoulder_pan")
+                robot.send_action({f"{n}.pos": goal_pos[n] for n in MOTOR_NAMES})
+                pan_limp = False
+            if had_command:
+                last_input_t = loop_start
 
             # ── joystick → action ────────────────────────────────────────────────
             if jm.connected and not args.observe:
                 deltas = smoother(get_joint_deltas(jm.joystick, jm.profile, dt, debounce=debouncer))
                 if not is_neutral(deltas):
+                    if pan_limp:
+                        # re-arm pan and snap its goal to where it physically rests, so
+                        # re-enabling torque holds in place instead of snapping to the old goal
+                        goal_pos["shoulder_pan"] = bus.read("Present_Position", "shoulder_pan")
+                        bus.enable_torque("shoulder_pan")
+                        pan_limp = False
                     goal_pos = apply_deltas(goal_pos, deltas)
                     robot.send_action({f"{n}.pos": goal_pos[n] for n in MOTOR_NAMES})
+                    last_input_t = loop_start
+
+            # ── idle → release shoulder_pan torque (stops setpoint hunting) ──────
+            if not args.observe and not pan_limp and loop_start - last_input_t > IDLE_LIMP_S:
+                bus.disable_torque("shoulder_pan")
+                pan_limp = True
 
             # ── telemetry below runs at --rate; fast ticks stop here ─────────────
             if loop_start - last_poll < poll_dt:
@@ -671,11 +707,15 @@ def main():
             detect_t.join(timeout=1.0)
         if twin:
             twin.close()
+        if pan_limp:
+            bus.enable_torque("shoulder_pan")   # re-arm so the soft landing can move pan
         graceful_shutdown(robot)
         try:
             robot.disconnect()
         except Exception as e:
             print(f"  Disconnect warning (torque disable likely succeeded): {e}")
+        jm.close()
+        pygame.joystick.quit()
         pygame.quit()
         if csv_f:
             csv_f.close()
