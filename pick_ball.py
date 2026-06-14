@@ -65,8 +65,11 @@ BALL_Z = (-0.02, 0.12)
 
 APPROACH_CLEAR = 0.05      # pre-grasp clearance back along the fingers (m)
 LIFT_CLEAR = 0.08          # lift height above grasp (m)
+GRASP_PITCH_DEG = 15.0     # downward tilt of the finger-axis at grasp (deg). 0 = level side
+                           # approach; positive = nose-down (fingers angle toward the table).
+                           # 10-20 reaches over the ball's holder; play with it here.
 GRIP_OPEN = 95.0           # gripper command while approaching (0=closed, 100=open)
-GRIP_GRASP = 30.0          # partial-close floor: don't fully shut (no crush). Placeholder
+GRIP_GRASP = 18.0          # partial-close floor: don't fully shut (no crush). Placeholder
                            # until the close target is sized to the object (radius -> mm).
 MOVE_SECONDS = 2.5         # per segment, linear joint interpolation
 RATE = 20                  # interpolation steps/s
@@ -147,16 +150,19 @@ class Kin:
                                        self.lim[j][0], self.lim[j][1]))
             # wrist_roll (dq[4]) intentionally not applied
 
-    def ik(self, p_target, ang0, iters=400, damping=2e-3, w_rot=0.5, approach_dir=None):
+    def ik(self, p_target, ang0, iters=400, damping=2e-3, w_rot=0.5, approach_dir=None,
+           pitch_deg=GRASP_PITCH_DEG):
         """Joint angles (deg) putting the TCP at p_target with the fingers pointing along
-        approach_dir. Default = HORIZONTAL, radially OUTWARD from the base toward the
-        target: a SIDE approach (wrist level, jaws grab the ball's equator). Orientation
-        is kept (only lightly eased) so the wrist stays horizontal. wrist_roll is held at
-        ang0's value. Returns (angles, pos_err_m, axis_err_deg)."""
+        approach_dir. Default = radially OUTWARD from the base toward the target, tilted
+        DOWN by pitch_deg: a side approach (jaws grab near the ball's equator). pitch_deg=0
+        is perfectly level; positive is nose-down. Orientation is kept (only lightly eased).
+        wrist_roll is held at ang0's value. Returns (angles, pos_err_m, axis_err_deg)."""
         if approach_dir is None:
-            approach_dir = np.array([p_target[0], p_target[1], 0.0])
-            n = np.linalg.norm(approach_dir)
-            approach_dir = approach_dir / n if n > 1e-6 else np.array([1.0, 0.0, 0.0])
+            horiz = np.array([p_target[0], p_target[1], 0.0])
+            n = np.linalg.norm(horiz)
+            horiz = horiz / n if n > 1e-6 else np.array([1.0, 0.0, 0.0])
+            p = math.radians(pitch_deg)
+            approach_dir = math.cos(p) * horiz + math.sin(p) * np.array([0.0, 0.0, -1.0])
         ang = dict(ang0)
         self._ik_pass(p_target, ang, iters, damping, w_rot, approach_dir)
         for w in (0.3, 0.15):                            # ease, but keep the wrist level
