@@ -31,6 +31,7 @@ import argparse
 import csv
 import os
 import queue
+import socket
 import sys
 import threading
 import time
@@ -392,6 +393,9 @@ def main():
     parser.add_argument("--detect-ball", action="store_true",
                         help="With --cameras, run YOLO ball detection on the realsense feed (2-D box in Rerun).")
     parser.add_argument("--twin", action="store_true", help="Launch the MuJoCo 3-D twin viewer.")
+    parser.add_argument("--serve", action="store_true",
+                        help="Serve the Rerun web viewer on 0.0.0.0:9090 (open from another LAN machine's browser) "
+                             "instead of the native local window.")
     parser.add_argument("--no-imu", action="store_true", help="Skip the ADXL345 IMU thread.")
     parser.add_argument("--no-log", action="store_true", help="Skip the CSV log.")
     parser.add_argument("--health", action="store_true", help="Print the startup register report.")
@@ -457,7 +461,21 @@ def main():
             detector = None
 
     # ── Rerun (auto-opens a viewer with a default layout) ───────────────────────
-    rr.init("so101_station", spawn=True)
+    rr.init("so101_station")
+    if args.serve:
+        # Serve a web viewer on 0.0.0.0:9090 (+ gRPC on 9876) for LAN access.
+        rr.serve_web(open_browser=False, default_blueprint=build_blueprint(args))
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            lan_ip = s.getsockname()[0]
+            s.close()
+        except OSError:
+            lan_ip = "<this-laptop-ip>"
+        print(f"\n  Rerun web viewer:  http://localhost:9090")
+        print(f"  From another laptop on the same Wi-Fi:  http://{lan_ip}:9090\n")
+    else:
+        rr.spawn()
     rr.send_blueprint(build_blueprint(args))
     log_stick_bounds()
 

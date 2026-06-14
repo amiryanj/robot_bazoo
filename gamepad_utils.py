@@ -27,6 +27,11 @@ JOINT_SPEED = {           # max speed at full stick, deg/s (gripper: units/s)
     "gripper":       35.0,
 }
 
+# Gripper is driven by face buttons (ZR was failing — firing without a press).
+# A opens, B closes. Change these labels to remap.
+GRIPPER_OPEN_BTN = "A"
+GRIPPER_CLOSE_BTN = "B"
+
 JOINT_LIMITS = {
     "shoulder_pan":  (-90,  90),
     "shoulder_lift": (-90,  90),
@@ -223,6 +228,21 @@ def save_axis_calibration(joystick, axis_calibration: dict) -> Path:
     return path
 
 
+def face_index(profile: dict, label: str) -> int | None:
+    """Joystick button index for a face label ('A'/'B'/'X'/'Y'), or None.
+    Looks in the override 'buttons' map first, then the profile's 'face'
+    (which is keyed index→label)."""
+    buttons = profile.get("buttons")
+    if isinstance(buttons, dict) and label in buttons:
+        return int(buttons[label])
+    face = profile.get("face")
+    if isinstance(face, dict):
+        for idx, lbl in face.items():
+            if lbl == label:
+                return int(idx)
+    return None
+
+
 def button_index(profile: dict, label: str) -> int | None:
     buttons = profile.get("buttons")
     if isinstance(buttons, dict) and label in buttons:
@@ -301,16 +321,22 @@ def get_joint_deltas(joystick, profile: dict, dt: float, debounce: "ButtonDeboun
             v = debounce(i, v)
         return int(v)
 
+    def face_btn(label):
+        idx = face_index(profile, label)
+        return btn(idx) if idx is not None else 0
+
     lx = axis(0); ly = axis(1)
     rx = axis(2); ry = axis(3)
     sh = profile["shoulder"]
+    gripper_open = face_btn(GRIPPER_OPEN_BTN)
+    gripper_close = face_btn(GRIPPER_CLOSE_BTN)
     return {
         "shoulder_pan":  -lx * JOINT_SPEED["shoulder_pan"] * dt,
         "shoulder_lift":  ly * JOINT_SPEED["shoulder_lift"] * dt,
         "elbow_flex":    -ry * JOINT_SPEED["elbow_flex"] * dt,
         "wrist_roll":     rx * JOINT_SPEED["wrist_roll"] * dt,
         "wrist_flex":    (btn(sh["L"]) - btn(sh["R"])) * JOINT_SPEED["wrist_flex"] * dt,
-        "gripper":       (btn(sh["ZL"]) - btn(sh["ZR"])) * JOINT_SPEED["gripper"] * dt,
+        "gripper":       (gripper_open - gripper_close) * JOINT_SPEED["gripper"] * dt,
     }
 
 

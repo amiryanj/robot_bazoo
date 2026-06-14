@@ -76,7 +76,9 @@ def main():
     T1 = (np.array(tc["R_cam2base"]), np.array(tc["t_cam2base"]))
 
     kin = Kin()                                       # fk applies delta to wrist_roll
-    assert abs(kin.roll_delta - delta) < 1e-6, "pick_ball.Kin must see tag_calib"
+    # Kin now sources wrist_roll from offset_calib.json (refines tag_calib by <1deg);
+    # tolerate that drift -- this tool only needs a consistent roll within ~1deg.
+    assert abs(kin.roll_delta - delta) < 2.0, "pick_ball.Kin roll far from tag_calib"
     bid = {tid: mujoco.mj_name2id(kin.m, mujoco.mjtObj.mjOBJ_BODY, t["body"])
            for tid, t in tags.items()}
     jaw_adr = kin.adr["gripper"]

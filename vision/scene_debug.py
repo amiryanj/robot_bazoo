@@ -4,14 +4,12 @@
 One MuJoCo viewer shows, in the BASE frame, live:
   - the arm, mirroring measured joint angles (torque is DISABLED — hand-move it),
   - the detected ball (orange sphere, depth-based, student-YOLO/GDINO detector),
-  - the pink heart MEASURED by the camera (magenta dot: detection + depth + T_cam->base),
-  - the same heart PREDICTED by kinematics (green dot: joints + FK + solved offset),
+  - the 3 ArUco tags (2 finger tags cyan, the static desk tag magenta),
   - the RANSAC table plane (grey slab, fitted once at startup).
 
-The magenta-vs-green gap is the end-to-end error of the whole chain (detection,
-depth, hand-eye transform, FK) at this very moment — it is printed live in mm.
-Hand-move the arm around; if the gap stays ~5-10 mm everywhere, the geometry is
-trustworthy. If the ball floats off its real spot, perception is lying.
+Hand-move the arm around; if the ball sits at its real spot and the cyan tags overlay
+the real finger tags, the geometry chain (detection, depth, hand-eye, FK + joint
+offsets) is trustworthy. If the ball floats off its real spot, perception is lying.
 
     python vision/scene_debug.py [--port /dev/ttyACM1] [--no-arm]
 Ctrl-C to quit (arm is limp throughout; nothing to land).
@@ -38,6 +36,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", default="/dev/ttyACM1")
     ap.add_argument("--no-arm", action="store_true", help="camera only (no FK overlay)")
+    ap.add_argument("--hold", action="store_true",
+                    help="keep torque ON (rigid, honest FK) — can't hand-move; "
+                         "avoids the backlash artifact of the limp arm")
     args = ap.parse_args()
 
     import cv2
@@ -51,17 +52,14 @@ def main():
     from ball_yolo import BALL_RADIUS_M, ball_from_box
     from cloud import crop_z, fit_sphere_known_r
     from cloud import deproject as cloud_deproject
-    from handeye_calib import HeartDetector, Realsense, backproject, make_fk
+    from handeye_calib import Realsense
     from pick_ball import BallDetector
 
     he = json.load(open(HANDEYE))
     R_cb, t_cb = np.array(he["R"]), np.array(he["t"])
-    offset = np.array(he["marker_offset"])
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     balls = BallDetector(device)
-    hearts = HeartDetector(device)
-    fk = make_fk()
     cam = Realsense()
 
     robot = None
@@ -70,8 +68,14 @@ def main():
         from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
         robot = SOFollower(SOFollowerRobotConfig(port=args.port, id="so101", cameras={}))
         robot.connect()
-        robot.bus.disable_torque()
-        print("Arm torque DISABLED — hand-move it freely.")
+        if args.hold:
+            print("Arm torque ON — holding its powered pose rigidly (honest FK, no backlash). "
+                  "Can't hand-move.")
+        else:
+            robot.bus.disable_torque()
+            print("Arm torque DISABLED — hand-move it freely. "
+                  "(NOTE: backlash under hand-load can show ~1-2cm phantom gap; use --hold "
+                  "for true geometry.)")
 
     m = mujoco.MjModel.from_xml_path(XML)
     d = mujoco.MjData(m)
@@ -84,13 +88,6 @@ def main():
         rrb.Horizontal(rrb.Spatial2DView(origin="cam", name="camera"),
                        rrb.Spatial3DView(origin="world", name="cloud (base frame)")),
         collapse_panels=True))
-
-    def project(p_base, K):
-        """Base-frame point -> image pixel via the hand-eye transform."""
-        pc = R_cb.T @ (np.asarray(p_base) - t_cb)
-        if pc[2] <= 0.05:
-            return None
-        return (K["fx"] * pc[0] / pc[2] + K["ppx"], K["fy"] * pc[1] / pc[2] + K["ppy"])
 
     # support planes: fit once at startup (full-frame RANSAC is too slow per-loop)
     from cloud import extract_planes
@@ -131,6 +128,35 @@ def main():
     def to_base(pts):
         return (R_cb @ pts.T).T + t_cb
 
+    def add_box(scn, i, ctr, R, half, rgba):
+        mujoco.mjv_initGeom(scn.geoms[i], mujoco.mjtGeom.mjGEOM_BOX,
+                            np.array([half, half, 0.0006]), np.asarray(ctr, float),
+                            np.asarray(R, float).ravel(), np.array(rgba, np.float32))
+
+    # the 3 ArUco tags as thin planar geoms: 2 finger tags (cyan, on the gripper bodies)
+    # + the static desk tag (magenta) -- to eyeball the tag calibration inside the twin.
+    tc = json.load(open(ROOT / "outputs/calib/tag_calib.json"))
+    finger_tags = [(mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, t["body"]),
+                    np.array(t["R"]), np.array(t["t"]), float(t["side_m"]) / 2)
+                   for t in tc["tags"].values()]
+    desk_geom = None
+    try:
+        dt = json.load(open(ROOT / "outputs/calib/desk_tag.json"))
+        dc, dK = np.array(dt["corners"]), dt["K"]
+        # the desk tag lies ON the white plate -> drop its rays onto the LIVE-detected
+        # plate (z_table0), not the stale baked-in zp (was -30mm, from the old hand-eye).
+        base = []
+        for u, v in dc:
+            r = R_cb @ np.array([(u - dK["ppx"]) / dK["fx"], (v - dK["ppy"]) / dK["fy"], 1.0])
+            base.append(t_cb + (z_table0 - t_cb[2]) / r[2] * r)
+        base = np.array(base)
+        e1, e2 = base[1] - base[0], base[3] - base[0]
+        xa = (e1 if abs(e1[0]) > abs(e2[0]) else e2).copy(); xa[2] = 0; xa /= np.linalg.norm(xa)
+        za = np.array([0.0, 0.0, 1.0]); ya = np.cross(za, xa)
+        desk_geom = (base.mean(0), np.column_stack([xa, ya, za]), float(dt["side_m"]) / 2)
+    except Exception as e:
+        print(f"desk tag viz off: {e}")
+
     frame_i = 0
     try:
         while viewer.is_running():
@@ -167,32 +193,16 @@ def main():
                     rr.log("world/ball_center", rr.Points3D([p_ball], radii=r_ball,
                                                             colors=(245, 130, 40, 120)))
 
-            uv, heart_boxes = hearts.marker_uv(color)
-            p_heart_meas = None
-            if uv is not None:
-                pc = backproject(*uv, depth, K)
-                if pc is not None:
-                    p_heart_meas = R_cb @ pc + t_cb
-
-            for nm, p, col in (("heart_meas", p_heart_meas, (255, 30, 200)),):
-                if p is not None:
-                    rr.log(f"world/{nm}", rr.Points3D([p], radii=0.008, colors=col))
-
-            p_heart_pred = None
             if robot is not None:
                 obs = robot.get_observation()
                 ang = {n: obs.get(f"{n}.pos", 0.0) for n in MOTOR_NAMES}
-                from pick_ball import ROLL_DELTA_DEG
+                from pick_ball import JOINT_OFFSETS
                 for j, a in adr.items():
-                    off = ROLL_DELTA_DEG if j == "wrist_roll" else 0.0
+                    off = JOINT_OFFSETS.get(j, 0.0)
                     d.qpos[a] = math.radians(ang[j] + off)
                 mujoco.mj_forward(m, d)
-                R_w, t_w = fk(ang)
-                p_heart_pred = R_w @ offset + t_w
-                rr.log("world/heart_pred", rr.Points3D([p_heart_pred], radii=0.008,
-                                                       colors=(30, 255, 60)))
 
-            # camera panel: image + ball box + every heart candidate + projected points
+            # camera panel: image + ball box
             rr.log("cam/image", rr.Image(cv2.cvtColor(color, cv2.COLOR_BGR2RGB)))
             if box:
                 rr.log("cam/ball", rr.Boxes2D(
@@ -200,24 +210,6 @@ def main():
                     array_format=rr.Box2DFormat.XYWH, labels=[f"ball {conf:.2f}"]))
             else:
                 rr.log("cam/ball", rr.Clear(recursive=False))
-            if heart_boxes:
-                rr.log("cam/hearts", rr.Boxes2D(
-                    array=[[x1, y1, x2 - x1, y2 - y1] for (x1, y1, x2, y2), *_ in heart_boxes],
-                    array_format=rr.Box2DFormat.XYWH,
-                    labels=[f"{c:.2f} pink={f:.2f}" for _, c, _, f in heart_boxes]))
-            else:
-                rr.log("cam/hearts", rr.Clear(recursive=False))
-            pts, cols = [], []
-            if uv is not None:
-                pts.append(list(uv)); cols.append((255, 30, 200))      # measured: magenta
-            if p_heart_pred is not None:
-                pp = project(p_heart_pred, K)
-                if pp is not None:
-                    pts.append(list(pp)); cols.append((30, 255, 60))   # predicted: green
-            if pts:
-                rr.log("cam/points", rr.Points2D(pts, radii=7, colors=cols))
-            else:
-                rr.log("cam/points", rr.Clear(recursive=False))
 
             scn = viewer.user_scn
             i = 0
@@ -229,21 +221,18 @@ def main():
             i += 1
             if p_ball is not None:
                 add_sphere(scn, i, p_ball, r_ball, [0.95, 0.5, 0.15, 1.0]); i += 1
-            if p_heart_meas is not None:
-                add_sphere(scn, i, p_heart_meas, 0.008, [1.0, 0.1, 0.8, 1.0]); i += 1
-            if p_heart_pred is not None:
-                add_sphere(scn, i, p_heart_pred, 0.008, [0.1, 1.0, 0.2, 1.0]); i += 1
+            if robot is not None:                              # 2 finger tags (cyan)
+                for bid, mR, mt, half in finger_tags:
+                    bR = d.xmat[bid].reshape(3, 3); bt = d.xpos[bid]
+                    add_box(scn, i, bR @ mt + bt, bR @ mR, half, [0.1, 0.9, 0.9, 0.9]); i += 1
+            if desk_geom is not None:                          # static desk tag (magenta)
+                add_box(scn, i, *desk_geom, [0.9, 0.2, 0.9, 0.9]); i += 1
             scn.ngeom = i
             viewer.sync()
 
             msg = []
             if p_ball is not None:
                 msg.append(f"ball={np.round(p_ball * 1000).astype(int)}mm@{conf:.2f}")
-            if p_heart_meas is not None and p_heart_pred is not None:
-                err = np.linalg.norm(p_heart_meas - p_heart_pred) * 1000
-                msg.append(f"heart err={err:.1f}mm")
-            elif p_heart_pred is not None:
-                msg.append("heart: not seen by camera")
             print("  " + ("   ".join(msg) if msg else "nothing detected"), end="\r")
             time.sleep(0.02)
     except KeyboardInterrupt:

@@ -30,16 +30,33 @@ sys.path.insert(0, str(ROOT / "vision"))
 XML = str(ROOT / "SO-ARM100/Simulation/SO101/scene.xml")
 HANDEYE = ROOT / "outputs/calib/handeye.json"
 TAG_CALIB = ROOT / "outputs/calib/tag_calib.json"   # wrist_roll mapping offset (delta)
-# THE real-degrees -> model-qpos roll correction (the "layer in between"): real horn sits
-# ~-85deg vs the CAD zero (vision/tag_sweep.py). Every consumer that feeds live/command
-# angles into MuJoCo (FK/IK, the Twin, scene_debug) must add it, or sim != reality.
-try:
-    ROLL_DELTA_DEG = float(json.load(open(TAG_CALIB))["delta_deg"])
-except Exception:
-    ROLL_DELTA_DEG = 0.0
+# THE real-degrees -> model-qpos correction (the "layer in between"): the real joint zeros
+# drift from the CAD/model zeros -- eyeballed lerobot homing on every joint, plus the
+# wrist_roll horn sitting ~-85deg off. Every consumer that feeds live/command angles into
+# MuJoCo (FK/IK, the Twin, scene_debug) must add these, or sim != reality. This does NOT
+# touch lerobot control -- only the sim/twin interpretation of the reported angles.
 TCP_SITE = "gripperframe"
 ARM_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
 MOTOR_NAMES = ARM_JOINTS + ["gripper"]
+OFFSET_CALIB = ROOT / "outputs/calib/offset_calib.json"
+
+
+def _load_joint_offsets():
+    """Per-joint command->model offsets (deg). Source: vision/offset_calib.py (GTSAM, all
+    5 arm joints incl. the desk-tag-resolved pan); falls back to tag_calib's wrist_roll-
+    only delta if that file is absent."""
+    try:
+        oc = json.load(open(OFFSET_CALIB))["delta_deg"]
+        return {j: float(oc[j]) for j in ARM_JOINTS}          # gripper omitted (unobservable)
+    except Exception:
+        try:
+            return {"wrist_roll": float(json.load(open(TAG_CALIB))["delta_deg"])}
+        except Exception:
+            return {}
+
+
+JOINT_OFFSETS = _load_joint_offsets()
+ROLL_DELTA_DEG = JOINT_OFFSETS.get("wrist_roll", 0.0)         # back-compat (tag_handeye)
 
 # workspace sanity bounds for the detected ball, base frame (metres)
 BALL_X = (0.12, 0.42)
@@ -82,21 +99,20 @@ class Kin:
 
     def fk(self, ang_deg):
         for j, a in self.adr.items():
-            off = self.roll_delta if j == "wrist_roll" else 0.0
+            off = JOINT_OFFSETS.get(j, 0.0)
             self.d.qpos[a] = math.radians(ang_deg.get(j, 0.0) + off)
         self.mj.mj_forward(self.m, self.d)
         R = self.d.site_xmat[self.sid].reshape(3, 3).copy()
         return R, self.d.site_xpos[self.sid].copy()
 
-    def _ik_pass(self, p_target, ang, iters, damping, w_rot):
+    def _ik_pass(self, p_target, ang, iters, damping, w_rot, approach_dir):
         jacp = np.zeros((3, self.m.nv))
         jacr = np.zeros((3, self.m.nv))
-        down = np.array([0.0, 0.0, -1.0])
         cols = self.dof[:4]                              # pan, lift, elbow, wrist_flex
         for _ in range(iters):
             R, p = self.fk(ang)
             e_pos = p_target - p
-            e_rot = np.cross(R[:, 0], down)              # rotation pulling x-axis onto -Z
+            e_rot = np.cross(R[:, 0], approach_dir)      # pull finger-axis onto approach_dir
             if np.linalg.norm(e_pos) < 5e-4 and w_rot * np.linalg.norm(e_rot) < 0.01:
                 break
             self.mj.mj_jacSite(self.m, self.d, jacp, jacr, self.sid)
@@ -109,21 +125,25 @@ class Kin:
                                        self.lim[j][0], self.lim[j][1]))
             # wrist_roll (dq[4]) intentionally not applied
 
-    def ik(self, p_target, ang0, iters=300, damping=2e-3, w_rot=0.2):
-        """Joint angles (deg) putting the TCP at p_target, fingers pointing downward as
-        a SOFT preference only — POSITION DOMINATES: if it hasn't converged, the
-        orientation weight is decayed so the solver trades tilt for reach (a sphere
-        tolerates a tilted grasp; far targets need ~60deg tilt). wrist_roll is held at
+    def ik(self, p_target, ang0, iters=400, damping=2e-3, w_rot=0.5, approach_dir=None):
+        """Joint angles (deg) putting the TCP at p_target with the fingers pointing along
+        approach_dir. Default = HORIZONTAL, radially OUTWARD from the base toward the
+        target: a SIDE approach (wrist level, jaws grab the ball's equator). Orientation
+        is kept (only lightly eased) so the wrist stays horizontal. wrist_roll is held at
         ang0's value. Returns (angles, pos_err_m, axis_err_deg)."""
+        if approach_dir is None:
+            approach_dir = np.array([p_target[0], p_target[1], 0.0])
+            n = np.linalg.norm(approach_dir)
+            approach_dir = approach_dir / n if n > 1e-6 else np.array([1.0, 0.0, 0.0])
         ang = dict(ang0)
-        self._ik_pass(p_target, ang, iters, damping, w_rot)
-        for w in (0.05, 0.01, 0.0):
+        self._ik_pass(p_target, ang, iters, damping, w_rot, approach_dir)
+        for w in (0.3, 0.15):                            # ease, but keep the wrist level
             _, p = self.fk(ang)
             if np.linalg.norm(p_target - p) < 0.006:
                 break
-            self._ik_pass(p_target, ang, 150, damping, w)
+            self._ik_pass(p_target, ang, 150, damping, w, approach_dir)
         R, p = self.fk(ang)
-        axis_err = math.degrees(math.acos(np.clip(-R[2, 0], -1, 1)))
+        axis_err = math.degrees(math.acos(np.clip(float(R[:, 0] @ approach_dir), -1, 1)))
         return ang, float(np.linalg.norm(p_target - p)), axis_err
 
     def approach_axis(self, ang):
@@ -132,12 +152,12 @@ class Kin:
         return R[:, 0]
 
 
-# fingers point down when shoulder_lift + elbow_flex + wrist_flex = +90 (model FK).
-# DLS is local, so try several postures along that constraint and keep the best —
-# far targets need the lean-forward branch, near ones the crouch.
-IK_SEEDS = [{"shoulder_lift": lift, "elbow_flex": elbow, "wrist_flex": 90 - lift - elbow,
-             "shoulder_pan": 0.0, "wrist_roll": 90.0, "gripper": 0.0}
-            for lift, elbow in ((-20, 50), (10, 20), (30, 0), (45, -20), (0, 60))]
+# SIDE approach: fingers level (horizontal) when shoulder_lift + elbow_flex + wrist_flex = 0
+# (model FK). DLS is local, so try several postures along that constraint and keep the best.
+# wrist_roll = 0 -> jaw opens left/right around the ball's equator (clears the holder).
+IK_SEEDS = [{"shoulder_lift": lift, "elbow_flex": elbow, "wrist_flex": -lift - elbow,
+             "shoulder_pan": 0.0, "wrist_roll": 0.0, "gripper": 0.0}
+            for lift, elbow in ((45, 45), (30, 30), (60, 20), (40, 60), (55, 5))]
 
 
 def ik_best(kin, p_target):
@@ -150,26 +170,33 @@ def ik_best(kin, p_target):
 
 
 def plan_waypoints(kin, p_base):
-    """IK the grasp (strict), then an approach waypoint backed off ALONG THE FINGERS.
-    The approach is a via point — the IK's closest reachable pose to the ideal
-    clearance is fine; only the grasp needs precision. Returns
-    (above, grasp, grasp_err_m, tilt_deg, above_err_m)."""
+    """Three via points for the side grasp (NO collision checking yet — these waypoints
+    are the poor-man's substitute):
+      high   — beside the ball but raised LIFT_CLEAR, so the big move in from rest goes
+               UP and over rather than sweeping the gripper low across the table;
+      above  — beside the ball at grasp height, backed off APPROACH_CLEAR along the fingers;
+      grasp  — the precise grasp pose (only this one needs precision).
+    Returns (high, above, grasp, grasp_err_m, axis_err_deg, above_err_m)."""
     grasp, e_g, tilt = ik_best(kin, p_base)
-    u = kin.approach_axis(grasp)                          # points from wrist toward ball
-    above, e_a, _ = kin.ik(np.asarray(p_base) - APPROACH_CLEAR * u, grasp)
-    return above, grasp, e_g, tilt, e_a
+    u = kin.approach_axis(grasp)                          # horizontal, points wrist -> ball
+    p_beside = np.asarray(p_base, float) - APPROACH_CLEAR * u
+    above, e_a, _ = kin.ik(p_beside, grasp)
+    high, _, _ = kin.ik(p_beside + np.array([0, 0, LIFT_CLEAR]), above)
+    return high, above, grasp, e_g, tilt, e_a
 
 
 def selftest():
     kin = Kin()
     ok = True
-    for target in ([0.26, 0.05, 0.03], [0.29, -0.08, 0.03], [0.20, 0.12, 0.03],
-                   [0.36, 0.0, -0.004]):                  # far: needs a tilted grasp
-        above, grasp, e_g, tilt, e_a = plan_waypoints(kin, target)
+    # SIDE approach needs the ball raised off the table (it sits on a holder, ~50mm),
+    # so the level gripper can reach the equator without the body hitting the surface.
+    for target in ([0.30, 0.05, 0.05], [0.33, -0.07, 0.055], [0.28, 0.12, 0.05],
+                   [0.36, 0.0, 0.05]):
+        high, above, grasp, e_g, tilt, e_a = plan_waypoints(kin, target)
         line = (f"  ball={np.round(target, 3)}  grasp_err={e_g * 1000:.1f}mm  "
-                f"tilt={tilt:.0f}deg  approach_short={e_a * 1000:.0f}mm  "
+                f"axis_err={tilt:.0f}deg  approach_short={e_a * 1000:.0f}mm  "
                 f"q={[round(grasp[j], 1) for j in ARM_JOINTS[:4]]}")
-        good = e_g < 0.008 and tilt < 70 and e_a < 0.05
+        good = e_g < 0.008 and tilt < 30 and e_a < 0.05
         ok &= good
         print(("OK " if good else "FAIL") + line)
     print("SELFTEST", "PASS" if ok else "FAIL")
@@ -363,7 +390,7 @@ class Twin:
 
     def set(self, ang_deg):
         for j, a in self.adr.items():
-            off = ROLL_DELTA_DEG if j == "wrist_roll" else 0.0
+            off = JOINT_OFFSETS.get(j, 0.0)
             self.d.qpos[a] = math.radians(ang_deg.get(j, 0.0) + off)
         self.mj.mj_forward(self.m, self.d)
         self.viewer.sync()
@@ -459,22 +486,18 @@ def main():
     if not inside:
         sys.exit("Refusing to move to an out-of-bounds target.")
 
-    # IK both waypoints before touching the arm
+    # IK both waypoints before touching the arm.
+    # SIDE approach: aim the TCP (fingertip plane) straight at the ball centre — the level
+    # jaws then close around the equator. (The old top-down code aimed below centre and
+    # applied corner_fkerr.json; both were tuned for the vertical grasp and don't apply.)
     kin = Kin()
-    target = np.asarray(p_base, float) - [0, 0, GRASP_DEPTH]
-    if ball.get("z_table") is not None:                 # keep tips clear of the support
-        target[2] = max(target[2], ball["z_table"] + 0.008)
-    fkerr_file = ROOT / "outputs/calib/corner_fkerr.json"
-    if fkerr_file.exists():                             # measured local FK bias (tags,
-        fkerr = np.array(json.load(open(fkerr_file))["fkerr"])  # differential method)
-        target -= fkerr
-        print(f"  FK feed-forward: target shifted by {np.round(-fkerr * 1000).astype(int)} mm")
-    above, grasp, e_g, tilt, e_a = plan_waypoints(kin, target)
-    print(f"  IK: grasp_err={e_g * 1000:.1f}mm  tilt={tilt:.0f}deg  "
+    target = np.asarray(p_base, float)
+    high, above, grasp, e_g, tilt, e_a = plan_waypoints(kin, target)
+    print(f"  IK: grasp_err={e_g * 1000:.1f}mm  axis_err={tilt:.0f}deg  "
           f"approach_short={e_a * 1000:.0f}mm")
-    if e_g > 0.008 or tilt > 70 or e_a > 0.05:
+    if e_g > 0.008 or tilt > 30 or e_a > 0.05:
         sys.exit("IK did not converge well — target out of reach. Aborting.")
-    for w in (above, grasp):
+    for w in (high, above, grasp):
         w["gripper"] = GRIP_OPEN
 
     twin = None
@@ -514,9 +537,11 @@ def main():
     robot.connect()
     try:
         cur = read_angles(robot)
-        print("1/6 above ball");  cur = move_to(robot, cur, above, twin=twin)
-        if rec: rec("1_above")
-        print("2/6 descend");     cur = move_to(robot, cur, grasp, seconds=2.0, twin=twin)
+        print("1/7 raise to safe height"); cur = move_to(robot, cur, high, twin=twin)
+        if rec: rec("1_high")
+        print("2/7 beside ball (pre-grasp)"); cur = move_to(robot, cur, above, twin=twin)
+        if rec: rec("2_beside")
+        print("3/7 move in (side)"); cur = move_to(robot, cur, grasp, seconds=2.0, twin=twin)
         if rec:
             import cv2 as _cv
             time.sleep(0.4)
@@ -531,24 +556,24 @@ def main():
                         int(_K["fy"] * pc[1] / pc[2] + _K["ppy"]))
             _cv.drawMarker(_c, _proj(_ptcp), (0, 255, 0), _cv.MARKER_CROSS, 24, 3)
             _cv.circle(_c, _proj(p_base), 8, (0, 165, 255), 3)
-            _cv.imwrite(str(rec_dir / "2_descend_aim.png"), _c)
+            _cv.imwrite(str(rec_dir / "3_movein_aim.png"), _c)
 
         # (depth-cloud finger servoing at the grasp pose was tried and removed: the
         # wrist occludes the scene below it — the top-down camera is blind exactly
         # there. Closed-loop correction lives in the ball-displacement pursuit instead.)
-        print("3/6 close");       cur = close_on_ball(robot, cur, twin=twin)
-        if rec: rec("3_closed")
-        lift = dict(cur); lift.update({k: above[k] for k in ARM_JOINTS})
-        print("4/6 lift");        cur = move_to(robot, cur, lift, seconds=2.0, twin=twin)
+        print("4/7 close");       cur = close_on_ball(robot, cur, twin=twin)
+        if rec: rec("4_closed")
+        lift = dict(cur); lift.update({k: high[k] for k in ARM_JOINTS})   # raise to safe height
+        print("5/7 lift");        cur = move_to(robot, cur, lift, seconds=2.0, twin=twin)
         time.sleep(1.0)
-        if rec: rec("4_lifted")
+        if rec: rec("5_lifted")
         down = dict(cur); down.update({k: grasp[k] for k in ARM_JOINTS})
-        print("5/6 put back");    cur = move_to(robot, cur, down, seconds=2.0, twin=twin)
+        print("6/7 put back");    cur = move_to(robot, cur, down, seconds=2.0, twin=twin)
         rel = dict(cur); rel["gripper"] = GRIP_OPEN
-        print("6/6 release");     cur = move_to(robot, cur, rel, seconds=1.0, twin=twin)
-        cur = move_to(robot, cur, dict(cur, **{k: above[k] for k in ARM_JOINTS}),
-                      seconds=1.5, twin=twin)
-        if rec: rec("6_done")
+        print("7/7 release");     cur = move_to(robot, cur, rel, seconds=1.0, twin=twin)
+        cur = move_to(robot, cur, dict(cur, **{k: high[k] for k in ARM_JOINTS}),
+                      seconds=1.5, twin=twin)         # retract up to safe height
+        if rec: rec("7_done")
         print("Done — grabbed, lifted, put back.")
     except KeyboardInterrupt:
         print("\nInterrupted.")
