@@ -19,9 +19,9 @@ state machine), then fine-tune the VLA on those episodes. Build in **randomizati
 gives a policy that can't recover from mistakes (covariate shift).
 
 **Critical path:** (1) ball detection + 3D point from depth (**done** — `vision/ball_yolo.py`)
-→ (2) **hand-eye calibration** (**done** — `vision/handeye_calib.py`, T_cam→base solved at
-**4.6 mm RMS** over 16 poses → `outputs/calib/handeye.json`; pink-heart marker + Grounding
-DINO, see below) → (3) scripted pick-place state machine
+→ (2) **hand-eye calibration** (**done** — `vision/cam_calib.py`, reference-anchored
+T_cam→base from the white-plate plane + desk tag → `outputs/calib/handeye.json`; recover
+after any camera move with `cam_calib.py recal`, see below) → (3) scripted pick-place state machine
 (IK via `placo`, already installed) → (4) auto-record LeRobot dataset in a loop →
 (5) train **ACT first** (tiny, trains locally for fast iteration), then **SmolVLA** (~450M,
 laptop-class, adds language). Big VLAs (OpenVLA-7B, Pi0) likely need cloud training.
@@ -107,7 +107,7 @@ These are the rules that keep a fresh session from breaking things:
   `placo==0.9.23`; `feetech-servo-sdk==1.0.0` (imports as `scservo_sdk`);
   `pyrealsense2==2.56.5.9235`; `opencv-python-headless==4.12.0`;
   `torchvision==0.20.1+cu124` (runtime-compatible with torch 2.5.1);
-  `transformers==4.49.0` (Grounding DINO for `handeye_calib.py` — **pin it**: transformers
+  `transformers==4.49.0` (Grounding DINO for the ball detector's GDINO fallback — **pin it**: transformers
   5.x pulls `huggingface-hub` 1.x which breaks lerobot's `<0.36.0` pin; keep hub at 0.35.x).
 
 ## Hardware
@@ -189,29 +189,25 @@ SmolVLA training+inference; big-VLA (7B) training needs the cloud.
   `vision/bench_localize.py`: legacy was 7 mm low in z, 13 mm off in y — a missed
   grasp; sphere fit lands ±2 mm of known resting geometry). Run
   `python vision/ball_yolo.py [<capture_dir>]` to verify; writes `yolo_overlay.png`.
-- `vision/handeye_calib.py` — **hand-eye calibration** (eye-to-hand, T_cam→base). **Ran
-  2026-06-11: 4.6 mm RMS over 16 poses → `outputs/calib/handeye.json`.** Marker = the
-  **pink heart** on a gripper finger (gripper opening must stay **fixed** during the run;
-  the solved offset absorbs the rest). `HeartDetector` runs **Grounding DINO**
-  (`grounding-dino-tiny`, zero-shot "heart.", threshold 0.12 — boxes the ball/tire too,
-  rejected by color) in a **background thread** (CPU inference would otherwise stall
-  teleop), then keeps the small box whose interior is mostly pink. **Pink wraps in HSV**:
-  H 160–166 in cool light but H≈0–2 in warm light, so gate both hue ends with **S capped
-  at 130** (pale sticker S 75–103 vs red arm plastic S 136–180 — saturation, not hue,
-  separates them). Learned shape + in-box color beats whole-frame color segmentation
-  (which grabbed the piano keys). Per captured pose: pink pixel + aligned depth → 3-D
-  (cam frame); joint angles → MuJoCo FK of `gripper` → 3-D (base frame). `solve_handeye`
-  (scipy `least_squares`, 4 rotation seeds) jointly fits **T_cam→base + the marker
-  offset** (9 unknowns). Gamepad teleop + typed `c`/`u`/`q`; live Rerun preview (green
-  dot = picked marker). `--selftest` verifies the solver offline.
-- `vision/heart_detect_test.py` — offline check: grab N Realsense frames (hand-move the
-  limp arm between grabs), run the heart detector on each, save annotated overlays. Used
-  to tune the color gates against real lighting before trusting them live.
-- `vision/scene_debug.py` — **the 3-D truth window**: MuJoCo viewer with the live arm
-  (torque disabled — hand-move it), the detected ball, the pink heart **measured**
-  (magenta) vs **FK-predicted** (green), and the fitted plane; prints the live
-  magenta-green gap in mm = end-to-end error of detection+depth+handeye+FK. Use this
-  first whenever localization looks wrong.
+- `vision/cam_calib.py` — **THE camera-pose calibration path** (T_cam→base, base frame =
+  robot base). Reference-anchored: the flat **white-plate plane** gives level (pitch/roll)
+  + height (z); the **fixed desk ArUco tag** (`DICT_4X4_50` **id 13** — the finger tags are
+  ids 1,2) gives x/y + yaw. Geometry uses no PnP — corner rays intersect the fitted plate
+  plane. Subcommands (no arm motion): `level` (correct a tilted hand-eye from the plate
+  prior), `anchor` (pin the desk tag in the base frame, once → `desk_anchor.json`), `recal`
+  (single-frame T_cam→base from desk tag + plate after touching the camera; tag averaged
+  ~16 frames → 0.3°/2 mm), `check` (self-check guard: table tilt < 2° AND ball sits on the
+  plate). Run `check` after anything that touches the camera; `level`/`recal` to fix it.
+  Supersedes the retired pink-heart `handeye_calib.py` (kept only for its `Realsense` class)
+  and the gripper-tag `tag_handeye.py` (deleted — clustered poses left a ~10° tilt).
+- `vision/scene_align.py` — **the alignment proof**: headless MuJoCo render overlaying, in
+  the base frame, the robot at live joints + the camera's coloured point cloud + the ball +
+  a z=0 reference + the measured plate + the camera as a pinhole frustum. If the cloud's
+  table is flat at the plate and the ball sits on it, T_cam→base is right.
+- `vision/scene_debug.py` — **the 3-D truth window**: live MuJoCo viewer with the arm
+  (`--hold` keeps torque on for honest FK), the detected ball, the finger tags (cyan,
+  FK-predicted) vs the live desk tag (magenta, `DICT_4X4_50` id 13), plus the workspace
+  point cloud (Rerun) and the fitted plane. Use it first whenever localization looks wrong.
 - `vision/autolabel.py` / `vision/detector_bench.py` / `vision/collect_marker_data.py` —
   the detector pipeline (see `vision/DETECTOR.md`): GDINO-teacher auto-labeling, the
   student-vs-teacher benchmark, and a bounded autonomous arm session that captures the
@@ -292,11 +288,12 @@ override) — edit it (not EEPROM) to change standing gains.
 - [x] Unified cockpit `station.py` — motors + IMU + gamepad in one Rerun window,
       synced CSV logging (`station.csv` + `imu.csv` on a shared clock)
 - [x] **YOLO ball detection → 3D point** (`vision/ball_yolo.py`, pretrained model)
-- [x] **Hand-eye calibration done** (`vision/handeye_calib.py`): pink-heart marker via
-      Grounding DINO + in-box color gate, MuJoCo FK of `gripper`, joint T_cam→base +
-      offset solver. Live run 2026-06-11: **4.6 mm RMS over 16 poses** →
-      `outputs/calib/handeye.json` (cam 471 mm above base, looking straight down).
-      See `vision/HANDEYE.md` for how/why.
+- [x] **Hand-eye calibration done — reference-anchored** (`vision/cam_calib.py`, 2026-06-14):
+      T_cam→base from the white-plate plane (level + z) + the fixed desk tag (`DICT_4X4_50`
+      id 13, x/y + yaw) → `outputs/calib/handeye.json` + `desk_anchor.json`. After any camera
+      move: `cam_calib.py recal` (single frame, no arm, 0.3°/2 mm) then `check`. Replaced the
+      pink-heart `handeye_calib.py` (heart gone; file kept only for its `Realsense` class) and
+      the gripper-tag `tag_handeye.py` (deleted — left a ~10° tilt). Verify with `scene_align.py`.
 - [x] **Real-arm tuning done (2026-06-11)** — `calibrate.py` now records the wrist IMU
       per capture; diagnosed the after-stop oscillation (underdamped loop + gravity)
       and fixed it with **D=200** on pan/lift/elbow, persisted via `gains.json`

@@ -1,3 +1,8 @@
+> **SUPERSEDED (2026-06-14).** The pink-heart marker is gone and `handeye_calib.py` is
+> retired (kept only for its `Realsense` class). Camera-pose calibration is now
+> reference-anchored in `vision/cam_calib.py` (white-plate plane + desk tag id 13); recover
+> after a camera move with `cam_calib.py recal`. Kept for historical context.
+
 # Hand-eye calibration (eye-to-hand): how it works and why
 
 **Result (2026-06-11):** `T_cam→base` solved at **4.6 mm RMS** over 16 poses →

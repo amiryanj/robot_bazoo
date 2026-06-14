@@ -139,23 +139,13 @@ def main():
     finger_tags = [(mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, t["body"]),
                     np.array(t["R"]), np.array(t["t"]), float(t["side_m"]) / 2)
                    for t in tc["tags"].values()]
-    desk_geom = None
-    try:
-        dt = json.load(open(ROOT / "outputs/calib/desk_tag.json"))
-        dc, dK = np.array(dt["corners"]), dt["K"]
-        # the desk tag lies ON the white plate -> drop its rays onto the LIVE-detected
-        # plate (z_table0), not the stale baked-in zp (was -30mm, from the old hand-eye).
-        base = []
-        for u, v in dc:
-            r = R_cb @ np.array([(u - dK["ppx"]) / dK["fx"], (v - dK["ppy"]) / dK["fy"], 1.0])
-            base.append(t_cb + (z_table0 - t_cb[2]) / r[2] * r)
-        base = np.array(base)
-        e1, e2 = base[1] - base[0], base[3] - base[0]
-        xa = (e1 if abs(e1[0]) > abs(e2[0]) else e2).copy(); xa[2] = 0; xa /= np.linalg.norm(xa)
-        za = np.array([0.0, 0.0, 1.0]); ya = np.cross(za, xa)
-        desk_geom = (base.mean(0), np.column_stack([xa, ya, za]), float(dt["side_m"]) / 2)
-    except Exception as e:
-        print(f"desk tag viz off: {e}")
+    # the static desk tag (magenta) is detected LIVE each frame: DICT_4X4_50 id 13 (the
+    # old MIP-36h12 "id 8" in desk_tag.json was stale). Drawn at its measured base position.
+    desk_par = cv2.aruco.DetectorParameters()
+    desk_par.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+    desk_det = cv2.aruco.ArucoDetector(
+        cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50), desk_par)
+    DESK_TAG_ID = 13
 
     frame_i = 0
     try:
@@ -210,6 +200,19 @@ def main():
                     array_format=rr.Box2DFormat.XYWH, labels=[f"ball {conf:.2f}"]))
             else:
                 rr.log("cam/ball", rr.Clear(recursive=False))
+
+            # live desk tag (id 13): position from depth at its centre, drawn flat
+            desk_geom = None
+            dcorn, dids, _ = desk_det.detectMarkers(cv2.cvtColor(color, cv2.COLOR_BGR2GRAY))
+            if dids is not None and DESK_TAG_ID in dids.ravel():
+                c4 = dcorn[list(dids.ravel()).index(DESK_TAG_ID)][0]
+                u0, v0 = c4.mean(0).astype(int)
+                win = depth[max(v0 - 3, 0):v0 + 4, max(u0 - 3, 0):u0 + 4]
+                win = win[win > 0]
+                if win.size:
+                    zc = float(np.median(win))
+                    pc = np.array([(u0 - K["ppx"]) / K["fx"], (v0 - K["ppy"]) / K["fy"], 1.0]) * zc
+                    desk_geom = (R_cb @ pc + t_cb, np.eye(3), 0.014)
 
             scn = viewer.user_scn
             i = 0
