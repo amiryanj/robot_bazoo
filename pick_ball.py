@@ -93,12 +93,31 @@ class Kin:
         # axis). Applied here only — IK in/out stays in command space. Without it
         # the planned grasp point is ~11 mm off (missed grasp, 2026-06-12).
         self.roll_delta = ROLL_DELTA_DEG
-        # finger-tag mounts -> the jaw-opening CENTRE (where the ball should sit). We aim
-        # this gap, not the TCP "gripperframe" site (which sits at the fixed finger, +28mm
-        # off the gap laterally — aiming the TCP plants the ball on that finger).
-        tc = json.load(open(TAG_CALIB))
-        self.tag_mounts = [(mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_BODY, t["body"]),
-                            np.array(t["t"])) for t in tc["tags"].values()]
+        # Collision model for the grasp-centre search: scene + a movable (mocap) ball geom.
+        # We aim the JAW-OPENING CENTRE at the ball, NOT the TCP "gripperframe" site — the
+        # site sits at the fixed finger, so aiming the TCP plants the ball on/through that
+        # finger. gap_center_offset() finds where a ball of given radius sits centred
+        # between the two fingers (equal clearance, no penetration) via mj_geomDistance.
+        scene_dir = Path(XML).parent
+        wrap = scene_dir / "_grasp_search.xml"
+        wrap.write_text('<mujoco model="grasp_search"><include file="scene.xml"/><worldbody>'
+                        '<body name="ballm" mocap="true" pos="0 0 0">'
+                        '<geom name="ballg" type="sphere" size="0.02" contype="0" '
+                        'conaffinity="0"/></body></worldbody></mujoco>')
+        try:
+            self.sm = mujoco.MjModel.from_xml_path(str(wrap))
+        finally:
+            wrap.unlink(missing_ok=True)
+        self.sd = mujoco.MjData(self.sm)
+        self.s_adr = {j: self.sm.jnt_qposadr[mujoco.mj_name2id(self.sm, mujoco.mjtObj.mjOBJ_JOINT, j)]
+                      for j in MOTOR_NAMES}
+        self.s_sid = mujoco.mj_name2id(self.sm, mujoco.mjtObj.mjOBJ_SITE, TCP_SITE)
+        self.s_ballg = mujoco.mj_name2id(self.sm, mujoco.mjtObj.mjOBJ_GEOM, "ballg")
+        gf = mujoco.mj_name2id(self.sm, mujoco.mjtObj.mjOBJ_BODY, "gripper")
+        gm = mujoco.mj_name2id(self.sm, mujoco.mjtObj.mjOBJ_BODY, "moving_jaw_so101_v1")
+        self.s_fixed = [g for g in range(self.sm.ngeom) if self.sm.geom_bodyid[g] == gf]
+        self.s_moving = [g for g in range(self.sm.ngeom) if self.sm.geom_bodyid[g] == gm]
+        self._gap_cache = {}
 
     def fk(self, ang_deg):
         for j, a in self.adr.items():
@@ -154,11 +173,40 @@ class Kin:
         R, _ = self.fk(ang)
         return R[:, 0]
 
-    def opening_center(self, ang):
-        """World position of the jaw-opening centre = midpoint of the two finger tags."""
-        self.fk(ang)
-        pts = [self.d.xmat[b].reshape(3, 3) @ t + self.d.xpos[b] for b, t in self.tag_mounts]
-        return np.mean(pts, axis=0)
+    def gap_center_offset(self, radius):
+        """Where a ball of this radius sits CENTRED between the two fingers, expressed in
+        the gripper frame (offset from the TCP site). Found by sweeping ball positions in
+        the finger pocket (gripper at GRIP_OPEN) and keeping the one with equal, positive
+        clearance to both fingers (centred, no penetration). Pose-independent (the fingers
+        are rigid to the gripper), so computed at a canonical pose and cached per radius."""
+        key = round(float(radius), 4)
+        if key in self._gap_cache:
+            return self._gap_cache[key]
+        m, d, mj = self.sm, self.sd, self.mj
+        m.geom_size[self.s_ballg] = [radius, 0, 0]
+        for j, a in self.s_adr.items():                       # canonical pose + GRIP_OPEN
+            d.qpos[a] = math.radians(JOINT_OFFSETS.get(j, 0.0))
+        d.qpos[self.s_adr["gripper"]] = math.radians(GRIP_OPEN + JOINT_OFFSETS.get("gripper", 0.0))
+        mj.mj_forward(m, d)
+        R = d.site_xmat[self.s_sid].reshape(3, 3)
+        tcp = d.site_xpos[self.s_sid]
+        best = None
+        for dx in np.linspace(-0.075, -0.01, 12):
+            for dy in np.linspace(-0.015, 0.04, 10):
+                for dz in np.linspace(-0.01, 0.07, 14):
+                    off = np.array([dx, dy, dz])
+                    d.mocap_pos[0] = tcp + R @ off
+                    mj.mj_forward(m, d)
+                    df = min(mj.mj_geomDistance(m, d, self.s_ballg, g, 0.5, None) for g in self.s_fixed)
+                    dm = min(mj.mj_geomDistance(m, d, self.s_ballg, g, 0.5, None) for g in self.s_moving)
+                    if df < 0.003 or dm < 0.003:              # must clear BOTH fingers
+                        continue
+                    score = abs(df - dm) + 0.5 * (df + dm)    # centred + snug in the pocket
+                    if best is None or score < best[0]:
+                        best = (score, off)
+        off = best[1] if best else np.zeros(3)
+        self._gap_cache[key] = off
+        return off
 
 
 # SIDE approach: fingers level (horizontal) when shoulder_lift + elbow_flex + wrist_flex = 0
@@ -178,7 +226,7 @@ def ik_best(kin, p_target):
     return best
 
 
-def plan_waypoints(kin, p_base):
+def plan_waypoints(kin, p_base, radius=0.0245):
     """Three via points for the side grasp (NO collision checking yet — these waypoints
     are the poor-man's substitute):
       high   — beside the ball but raised LIFT_CLEAR, so the big move in from rest goes
@@ -189,8 +237,8 @@ def plan_waypoints(kin, p_base):
     p_base = np.asarray(p_base, float)
     # rough aim, then re-aim so the JAW-OPENING CENTRE (not the TCP) lands on the ball:
     grasp0, _, _ = ik_best(kin, p_base)
-    R0, tcp0 = kin.fk(grasp0)
-    g_off = R0.T @ (kin.opening_center(grasp0) - tcp0)    # gap centre in gripper frame
+    R0, _ = kin.fk(grasp0)
+    g_off = kin.gap_center_offset(radius)                 # gap centre in gripper frame
     tcp_target = p_base - R0 @ g_off                      # so gap centre hits the ball
     grasp, e_g, tilt = ik_best(kin, tcp_target)
     u = kin.approach_axis(grasp)                          # horizontal, points wrist -> ball
@@ -512,7 +560,7 @@ def main():
     # applied corner_fkerr.json; both were tuned for the vertical grasp and don't apply.)
     kin = Kin()
     target = np.asarray(p_base, float)
-    high, above, grasp, e_g, tilt, e_a = plan_waypoints(kin, target)
+    high, above, grasp, e_g, tilt, e_a = plan_waypoints(kin, target, ball["radius_m"])
     print(f"  IK: grasp_err={e_g * 1000:.1f}mm  axis_err={tilt:.0f}deg  "
           f"approach_short={e_a * 1000:.0f}mm")
     if e_g > 0.008 or tilt > 30 or e_a > 0.05:
