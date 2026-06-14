@@ -707,8 +707,15 @@ def main():
             detect_t.join(timeout=1.0)
         if twin:
             twin.close()
+        # Ctrl-C can fire mid serial transaction, leaving the port handler's "in use"
+        # flag stuck True -> every cleanup write raises "Port is in use!" and the safe
+        # landing gets skipped. Clear it, and never let the pan re-arm abort the landing.
+        bus.port_handler.is_using = False
         if pan_limp:
-            bus.enable_torque("shoulder_pan")   # re-arm so the soft landing can move pan
+            try:
+                bus.enable_torque("shoulder_pan")   # re-arm so the soft landing can move pan
+            except Exception as e:
+                print(f"  Pan re-arm warning (continuing to land): {e}")
         graceful_shutdown(robot)
         try:
             robot.disconnect()

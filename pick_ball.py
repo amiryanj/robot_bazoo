@@ -63,15 +63,23 @@ BALL_X = (0.12, 0.42)
 BALL_Y = (-0.30, 0.30)
 BALL_Z = (-0.02, 0.12)
 
-APPROACH_CLEAR = 0.05      # pre-grasp clearance back along the fingers (m)
-LIFT_CLEAR = 0.08          # lift height above grasp (m)
-GRASP_PITCH_DEG = 15.0     # downward tilt of the finger-axis at grasp (deg). 0 = level side
-                           # approach; positive = nose-down (fingers angle toward the table).
-                           # 10-20 reaches over the ball's holder; play with it here.
-GRIP_OPEN = 95.0           # gripper command while approaching (0=closed, 100=open)
-GRIP_GRASP = 18.0          # partial-close floor: don't fully shut (no crush). Placeholder
-                           # until the close target is sized to the object (radius -> mm).
-MOVE_SECONDS = 2.5         # per segment, linear joint interpolation
+# Grasp tuning lives in config/grasp.json — edit that file, not these lines.
+#   pitch_approach_deg : downward tilt of the finger-axis at grasp (0 = level side approach,
+#                        positive = nose-down toward the table; 10-20 reaches over a holder).
+#   roll_approach_deg  : wrist_roll command at grasp (0 = the finger tags face the camera).
+#   gripper_open       : opening while approaching (0 = closed, 100 = open).
+#   gripper_grasp      : partial-close floor — don't fully shut (no crush).
+#   approach_clear_m   : pre-grasp back-off along the fingers (m).
+#   lift_clear_m       : lift height above the grasp (m).
+#   move_seconds       : per-segment linear-interpolation time (s).
+_GRASP_CFG = json.load(open(ROOT / "config/grasp.json"))
+GRASP_PITCH_DEG = float(_GRASP_CFG["pitch_approach_deg"])
+GRASP_ROLL_DEG = float(_GRASP_CFG["roll_approach_deg"])
+GRIP_OPEN = float(_GRASP_CFG["gripper_open"])
+GRIP_GRASP = float(_GRASP_CFG["gripper_grasp"])
+APPROACH_CLEAR = float(_GRASP_CFG["approach_clear_m"])
+LIFT_CLEAR = float(_GRASP_CFG["lift_clear_m"])
+MOVE_SECONDS = float(_GRASP_CFG["move_seconds"])
 RATE = 20                  # interpolation steps/s
 
 
@@ -220,7 +228,7 @@ class Kin:
 # (model FK). DLS is local, so try several postures along that constraint and keep the best.
 # wrist_roll = 0 -> jaw opens left/right around the ball's equator (clears the holder).
 IK_SEEDS = [{"shoulder_lift": lift, "elbow_flex": elbow, "wrist_flex": -lift - elbow,
-             "shoulder_pan": 0.0, "wrist_roll": 0.0, "gripper": 0.0}
+             "shoulder_pan": 0.0, "wrist_roll": GRASP_ROLL_DEG, "gripper": 0.0}
             for lift, elbow in ((45, 45), (30, 30), (60, 20), (40, 60), (55, 5))]
 
 

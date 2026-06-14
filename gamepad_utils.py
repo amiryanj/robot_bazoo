@@ -417,27 +417,28 @@ def draw_button(surf, x: int, y: int, pressed: bool, label: str):
 
 # ── Graceful shutdown ──────────────────────────────────────────────────────────
 
-# Two-stage landing (2026-06-12). REST_POSE is the full-torque approach target,
-# ~14 mm (FK-checked) above the arm's measured min-energy pose — margin against
+# Two-stage landing (2026-06-12, rest pose re-sited 2026-06-14). REST_POSE is the
+# full-torque approach target, ~12 mm (FK-checked) above SETTLE_POSE — margin against
 # collisions. From there graceful_shutdown clamps Torque_Limit to SOFT_TORQUE and
-# floats down to SETTLE_POSE (the torque-off equilibrium measured from station.csv
-# cold starts, commanded ~1.5 deg past contact): the limited servo stalls gently on
-# the table instead of pressing, and the final torque-off drops millimeters. The
-# old single pose (lift 40, wrist 0) dropped the gripper 87 mm with a clunk.
+# floats down to SETTLE_POSE (the resting equilibrium): the limited servo stalls gently
+# on the table instead of pressing, and the final torque-off drops millimeters.
+# SETTLE_POSE is the pose Javad hand-placed (2026-06-14) so the folded arm does NOT
+# occlude the desk ArUco tag — the old (lift 81, elbow -5) pose blocked it. REST_POSE
+# is the same pose raised ~12 mm (shoulder_lift -12, wrist_flex compensates to stay level).
 REST_POSE = {
-    "shoulder_pan":  0.0,
-    "shoulder_lift": 73.0,
-    "elbow_flex":    -4.0,
-    "wrist_flex":    -60.0,
+    "shoulder_pan":  4.7,
+    "shoulder_lift": 47.7,
+    "elbow_flex":    36.6,
+    "wrist_flex":    -56.4,
     "wrist_roll":    0.0,
     "gripper":       4.0,
 }
 
 SETTLE_POSE = {
-    "shoulder_pan":  0.0,
-    "shoulder_lift": 81.0,
-    "elbow_flex":    -5.0,
-    "wrist_flex":    -72.0,
+    "shoulder_pan":  4.7,
+    "shoulder_lift": 59.7,
+    "elbow_flex":    36.6,
+    "wrist_flex":    -74.4,
     "wrist_roll":    0.0,
     "gripper":       4.0,
 }

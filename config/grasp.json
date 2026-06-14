@@ -1,0 +1,9 @@
+{
+  "pitch_approach_deg": 30.0,
+  "roll_approach_deg": 0.0,
+  "gripper_open": 80.0,
+  "gripper_grasp": 20.0,
+  "approach_clear_m": 0.05,
+  "lift_clear_m": 0.08,
+  "move_seconds": 2.5
+}
