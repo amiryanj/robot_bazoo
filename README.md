@@ -111,8 +111,11 @@ Everything written down in this repo, from here:
 |---|---|
 | `station.py` | **Main entry point.** Gamepad teleop + typed commands while motors, the wrist IMU, the controller, and (opt) cameras stream to one Rerun window + CSV. Flags: `--observe` (read-only), `--health`, `--cameras`, `--twin`, `--no-imu`, `--no-log`. |
 | `pick_ball.py` | Scripted ball pick (WIP): student-YOLO detection → sphere-fit 3-D → IK → staged grasp; `--dry-run`, `--watch`, `--selftest`, MuJoCo twin preview |
-| `gamepad_debug.py` | Robot-free pygame joystick debugger: raw axes/buttons/hats + SO-101 joint-command mapping |
-| `gamepad_utils.py` | Shared controller profiles, smoothing, graceful shutdown |
+| `teleop_tag.py` | **Tag teleop:** move the arm by moving a tag-marked joystick in front of a webcam; clutched-relative mapping, IMU-fused. See [TELEOP.md](TELEOP.md). `--sim`, `--gain`, `--max-speed`, `--axes`, `--view` |
+| `pad_imu.py` | The Pro Controller's own 6-axis IMU as a teleop sensor: evdev reader, extrinsic calibration, position KF |
+| `vision/tag_pose.py`, `vision/tag_body.py` | Base tag layer (camera + ArUco + PnP) and the rigid multi-tag body model |
+| `record_pick.py` | Record real-arm pick demos into a LeRobot dataset, driven by the scripted policy |
+| `gamepad_utils.py` | Shared controller profiles, smoothing, graceful shutdown; `python gamepad_utils.py` is the robot-free joystick debugger |
 | `sim_collect.py` | Collect episodes in MuJoCo as a LeRobot dataset |
 | `servo_tuning.py` | Tuning toolbox: PID r/w, trajectories, step/FRF analysis |
 | `calibrate.py` | `step` / `chirp` / `profile` / `autotune` CLI for the servos |
@@ -125,7 +128,8 @@ Everything written down in this repo, from here:
 ```bash
 python station.py                  # full cockpit: teleop + motors + IMU → Rerun + CSV
 python station.py --observe        # read-only telemetry (safe, no motion)
-python gamepad_debug.py            # joystick-only debug; no robot/MuJoCo/Rerun
+python gamepad_utils.py            # joystick-only debug; no robot/MuJoCo/Rerun
+sg input -c "python teleop_tag.py --sim --gain 1.0"   # tag teleop against the MuJoCo twin
 python calibrate.py autotune --joint shoulder_pan --size 25 --trials 40
 ```
 

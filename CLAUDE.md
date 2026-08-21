@@ -134,9 +134,17 @@ looking at the workspace** (the scene cam for ball detection; depth gives metric
 wrist webcam index `15` (`opencv`, 640×480 @ **25** fps — 30 raises RuntimeError). Known
 issue: both on the same USB hub stall (bandwidth); each works alone. Scripts connect
 cameras fault-tolerantly and accept `--no-realsense` / `--no-wrist`.
+A third, plain USB webcam at **`/dev/video9`** (1280×720, no intrinsics — K guessed from a
+70° FOV) watches the hand-held tag joystick for `teleop_tag.py`; it is unrelated to the
+scene/wrist cams above.
 
 **Gamepad** — Nintendo Switch Pro Controller (pygame name `"Pro Controller"`). Profiles
-auto-detected in `gamepad_utils.py`.
+auto-detected in `gamepad_utils.py`. It also carries a **factory-calibrated 6-axis IMU**
+that `hid_nintendo` exposes as a SEPARATE evdev device `Pro Controller (IMU)` — accel
+4096 units/g, gyro 14247 units per °/s, bursty ~201 Hz (new info ~77 Hz). Read it with
+python-evdev, **not** pygame/SDL, and **not** via `evdev.list_devices()` (which filters to
+read-write devices) — glob `/dev/input/event*`. Needs the `input` group: prefix commands
+with `sg input -c "..."`. Driver + calibration in `pad_imu.py`.
 
 **Compute** — laptop with an **NVIDIA RTX 3000 Ada Laptop GPU (~8 GB VRAM)**. Fits ACT /
 SmolVLA training+inference; big-VLA (7B) training needs the cloud.
@@ -172,6 +180,31 @@ SmolVLA training+inference; big-VLA (7B) training needs the cloud.
 **Sim & data:**
 - `sim_collect.py` — gamepad teleop inside MuJoCo, records episodes as a LeRobot
   dataset (for ACT training without the real arm). Scene: `scene_sim.xml` (ball + cams).
+- `record_pick.py` — **critical-path step 4**: record real-arm pick demos into a LeRobot
+  dataset, driven by the scripted policy (`pick_ball.run_grasp`), one episode per cycle,
+  appending across sessions. Always lands via `graceful_shutdown` on exit.
+
+**Teleop by tagged joystick (see [TELEOP.md](TELEOP.md)):**
+- `teleop_tag.py` — **the tag-teleop entry point.** A webcam tracks AprilTags on the
+  hand-held Pro Controller; its motion drives TCP position + wrist roll, while the
+  gamepad's own buttons carry the clutch (hold **L**) and gripper. Mapping is **clutched
+  relative** (mouse-lift): `tcp = anchor_tcp + gain * M @ (hand - anchor_hand)`.
+  Reuses every existing layer — `pick_ball.Kin`/`Twin`, `tag_body`/`tag_pose`,
+  `gamepad_utils`, `station.JoystickManager`, `sim_backend.SimRobot`, `pad_imu.PadIMU`.
+  Flags: `--sim`, `--gain`, `--max-speed`, `--axes`, `--cage`, `--view`, `--no-twin`,
+  `--no-imu`, `--no-bridge`, `--no-rr-images`, `--dry-run`. Logs
+  `outputs/teleop/<ts>/teleop.csv` including **per-stage tick timing**
+  (`ms_grab`/`ms_detect`/`ms_ik`/`ms_twin`/`ms_rerun`/`ms_rest`) — read those before
+  theorising about where the loop went slow.
+- `pad_imu.py` — the controller's own 6-axis IMU as a teleop sensor: evdev reader
+  (`PadIMU`), the IMU→tag-body extrinsic `X`, and a 9-state linear KF (position,
+  velocity, **accel bias**) that bridges tag dropouts. Subcommands `probe`, `bias`,
+  `align`, `check`, `selftest`. Calibration → `outputs/calib/pad_imu.json`.
+- `vision/tag_pose.py` — **the base tag layer**: camera sources (`Webcam`, `RS`,
+  `open_source`), the ArUco detector wrapper (`make_detector`, `detect`) and single-tag
+  `SOLVEPNP_IPPE_SQUARE` PnP. Everything tag-shaped imports this.
+- `vision/tag_body.py` — rigid **multi-tag body model** (bundle-adjusted) so any one
+  visible tag yields the same body pose. Body frame = reference tag id 13.
 
 **Vision (perception, WIP):**
 - `vision/capture_frame.py` — grab one aligned color+depth+intrinsics frame from the
@@ -326,6 +359,22 @@ override) — edit it (not EEPROM) to change standing gains.
       gently on contact, error zeroed, limit restored. Verified on hardware:
       settles ±2.6 deg of equilibrium, TL back at 1000. The STS3215 has no real
       torque/impedance mode; RAM `Torque_Limit` is the compliance lever.
+- [~] **Tag teleop (WIP)** — `teleop_tag.py`: webcam-tracked tag joystick → clutched
+      relative TCP control, with the controller's own IMU fused in by a 9-state linear KF.
+      Full write-up in [TELEOP.md](TELEOP.md). Works on the real arm. **2026-08-21 loop
+      profiling**: idle IK was solving a frozen target and discarding it (168 → 0.03 ms);
+      `_ik_pass` ran provably-dead iterations once a joint pinned (50–150 of every pass
+      were no-ops — fixed-point break is bit-identical and 4.4× faster); `ms_detect`
+      (28.8 ms, full 1280×720 + subpix) is now the largest single cost. Hardware is NOT
+      the constraint (i9-13900H, 33 GFLOP/s single-thread).
+      **Top blocker: tag coverage** — `tags == 2` has been 0% in every run, so only one
+      hand orientation is trackable, and ~half of all hand motion happens during
+      undetected blind gaps (28 gaps, mean 0.80 s, 68% over the 0.4 s timeout) and is
+      silently discarded. That, not latency, is what makes the arm feel like it drifts.
+- [ ] **Tag id collision** — desk anchor tag (`cam_calib.py`) and joystick reference tag
+      (`joystick_body.json`) are both `DICT_4X4_50` **id 13** at 27.4 mm. Harmless in
+      normal use (different cameras); `cam_calib.py recal` will mis-anchor if the
+      controller sits in the Realsense's view. Renumber when the tags are reprinted.
 - [ ] Realsense + wrist cam USB bandwidth (works alone, stalls together)
 - [ ] Collect sim episodes → cloud ACT training (plan exists)
 
