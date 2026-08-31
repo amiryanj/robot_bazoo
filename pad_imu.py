@@ -47,12 +47,15 @@ reconnecting -- udev makes a fresh node each time.)
 from __future__ import annotations
 
 import argparse
+import csv
 import glob
 import json
 import math
 import sys
 import threading
 import time
+from collections import Counter
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -62,7 +65,27 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vision"))
 
 CALIB = ROOT / "outputs/calib/pad_imu.json"
+# The tag body the controller carries. Now the 3-face box (vision/box_tags.py fit);
+# the old two-tag joystick_body.json still loads via --model.
+BODY_MODEL = ROOT / "outputs/calib/box_body.json"
+# The driver's reported gyro resolution reads ~14% HIGH on this controller. Measured
+# 2026-08-31 by two independent methods that agree to 0.001: vision (tag-body rotation vs
+# gyro, median ratio 0.876) and gravity alone (still->still accelerometer transitions, no
+# camera, 0.875). Correcting it takes the gravity residual from 12.32 deg to 1.72 deg over
+# 94 deg rotations. Re-measure per controller with `pad_imu.py gyrocal`; the value in the
+# calib file wins over this default.
+GYRO_SCALE_DEFAULT = 0.877
+STILL_SD_DPS = 3.0                 # gyro sd above this means it was NOT still
+LOG_ROOT = ROOT / "outputs/pad_imu"
 G = 9.80665
+
+
+def _saved_gyr_scale():
+    """Calibrated gyro scale if `gyrocal` has been run, else the measured default."""
+    try:
+        return float(json.loads(CALIB.read_text())["gyr_scale"])
+    except Exception:
+        return GYRO_SCALE_DEFAULT
 
 
 def find_imu():
@@ -82,6 +105,48 @@ def find_imu():
     return None
 
 
+def _no_imu_reason():
+    """Say which of the FOUR things actually went wrong, instead of always blaming groups.
+
+    The previous message blamed the 'input' group unconditionally. On 2026-08-21 that was
+    wrong in the most expensive way: the group was correct, `sg input` was being used, and
+    the controller had simply been asleep -- its (IMU) node appears a moment AFTER the
+    joystick node. A confident misdiagnosis costs more than no diagnosis."""
+    import grp
+    import os
+    listed = Path("/proc/bus/input/devices").read_text()
+    has_pad = 'Name="Pro Controller"' in listed
+    has_imu = 'Name="Pro Controller (IMU)"' in listed
+    denied = []
+    for path in sorted(glob.glob("/dev/input/event*")):
+        try:
+            os.close(os.open(path, os.O_RDONLY))
+        except PermissionError:
+            denied.append(path)
+        except OSError:
+            pass
+    try:
+        in_group = grp.getgrnam("input").gr_gid in os.getgroups()
+    except KeyError:
+        in_group = False
+
+    if has_imu and denied and not in_group:
+        return ("the IMU node exists but this process is NOT in the 'input' group:\n"
+                '    sg input -c "$CONDA_PREFIX/bin/python pad_imu.py ..."\n'
+                "  (or `sudo usermod -aG input $USER` once, then log out and back in)")
+    if has_imu and denied:
+        return (f"'Pro Controller (IMU)' is listed and this process IS in the 'input' "
+                f"group, yet {denied[0]} is unreadable — check the node's ACL:\n"
+                "    getfacl /dev/input/event*\n"
+                "    sudo setfacl -m u:$USER:r /dev/input/eventN")
+    if has_pad and not has_imu:
+        return ("the controller is connected but its '(IMU)' node has not appeared — it "
+                "is created a moment after the joystick node, and not at all while the "
+                "pad is asleep. Press Home, wait ~2 s, and retry.")
+    return ("no 'Pro Controller' in /proc/bus/input/devices — the controller is not "
+            "connected. Press Home on it to wake the Bluetooth link.")
+
+
 class PadIMU(threading.Thread):
     """Background reader. Keeps the newest sample and integrates body rotation.
 
@@ -89,22 +154,14 @@ class PadIMU(threading.Thread):
     because that is where the factory calibration lands: accel in units/g, gyro in units
     per deg/s (Linux input event-codes convention for INPUT_PROP_ACCELEROMETER)."""
 
-    def __init__(self, path=None, bias=None):
+    def __init__(self, path=None, bias=None, gyr_scale=None):
         super().__init__(daemon=True)
         import evdev
         from evdev import ecodes
         self.ecodes = ecodes
         path = path or find_imu()
         if path is None:
-            connected = Path("/proc/bus/input/devices").read_text().count("Pro Controller")
-            raise RuntimeError(
-                "the controller is connected but its IMU node is not readable — this "
-                "shell predates your 'input' group membership. Either log out and back "
-                "in, or prefix the command:\n"
-                '    sg input -c "$CONDA_PREFIX/bin/python pad_imu.py ..."'
-                if connected else
-                "no 'Pro Controller (IMU)' node — the controller is not connected. "
-                "Press Home on it to wake the Bluetooth link.")
+            raise RuntimeError(_no_imu_reason())
         self.dev = evdev.InputDevice(path)
         self.name = self.dev.name
 
@@ -112,6 +169,7 @@ class PadIMU(threading.Thread):
         res = {c: i.resolution for c, i in absinfo}
         self.acc_per_g = float(res.get(ecodes.ABS_X) or 4096)
         self.gyr_per_dps = float(res.get(ecodes.ABS_RX) or 14247)
+        self.gyr_scale = float(gyr_scale) if gyr_scale is not None else _saved_gyr_scale()
         self._slot = {ecodes.ABS_X: 0, ecodes.ABS_Y: 1, ecodes.ABS_Z: 2,
                       ecodes.ABS_RX: 3, ecodes.ABS_RY: 4, ecodes.ABS_RZ: 5}
 
@@ -143,7 +201,8 @@ class PadIMU(threading.Thread):
             elif e.type == ec.EV_SYN:
                 t = time.perf_counter()
                 a = np.array(self._raw[:3], float) / self.acc_per_g * G
-                w = np.radians(np.array(self._raw[3:], float) / self.gyr_per_dps)
+                w = np.radians(np.array(self._raw[3:], float)
+                               / self.gyr_per_dps) * self.gyr_scale
                 with self._lock:
                     self.acc, self.gyr, self.t = a, w - self.bias, t
                     self.n += 1
@@ -327,6 +386,7 @@ def fit_alignment(t_i, w_i, Rv, tv, window=0.35, tol=0.20, verbose=True):
 
 
 RAW = ROOT / "outputs/calib/pad_imu_raw.npz"
+GYRO_RAW = ROOT / "outputs/calib/pad_imu_gyrocal.npz"
 POSES = ROOT / "outputs/calib/pad_imu_poses.npz"
 
 
@@ -463,13 +523,16 @@ def load_calib():
     if d.get("X") is None:                 # bias-only file: alignment not solved yet
         return None
     return dict(X=np.array(d["X"], float), bias=np.array(d["bias"], float),
-                lag=float(d.get("lag", 0.0)), rms_dps=float(d.get("rms_dps", float("nan"))))
+                lag=float(d.get("lag", 0.0)), rms_dps=float(d.get("rms_dps", float("nan"))),
+                gyr_scale=float(d.get("gyr_scale", GYRO_SCALE_DEFAULT)))
 
 
 def save_calib(X, bias, lag, rms_dps, n):
     CALIB.parent.mkdir(parents=True, exist_ok=True)
-    CALIB.write_text(json.dumps(dict(X=X.tolist(), bias=list(map(float, bias)),
-                                     lag=lag, rms_dps=rms_dps, samples=int(n)), indent=2))
+    d = json.loads(CALIB.read_text()) if CALIB.exists() else {}
+    d.update(X=X.tolist(), bias=list(map(float, bias)), lag=lag, rms_dps=rms_dps,
+             samples=int(n), gyr_scale=_saved_gyr_scale())   # keep the gyro calibration
+    CALIB.write_text(json.dumps(d, indent=2))
     print(f"  saved -> {CALIB}")
 
 
@@ -521,11 +584,20 @@ def cmd_align(args):
     imu = PadIMU()
     imu.start()
     time.sleep(0.4)
-    print("Hold the controller STILL for 2 s (gyro bias)...")
-    bias, _ = imu.measure_bias(2.0)
-    print(f"  bias {np.round(np.degrees(bias), 2)} deg/s\n")
+    print("Rest the controller ON THE TABLE and do not touch it (gyro bias, 3 s)...")
+    bias, sd = imu.measure_bias(3.0)
+    sd_dps = float(np.degrees(np.linalg.norm(sd)))
+    print(f"  bias {np.round(np.degrees(bias), 2)} deg/s  (sd {sd_dps:.2f} deg/s)")
+    if sd_dps > STILL_SD_DPS:
+        imu.stop()
+        sys.exit(f"\n  ABORT: the controller was MOVING during the bias measurement "
+                 f"(sd {sd_dps:.2f} > {STILL_SD_DPS} deg/s).\n"
+                 f"  A bias error of 10 deg/s rotates X by ~16 deg (measured), which is\n"
+                 f"  most of the run-to-run spread we saw. Put it down on the table,\n"
+                 f"  let go, and re-run.")
+    print()
 
-    model = load_model()
+    model = load_model(args.model)
     det = make_detector("DICT_4X4_50")
     keep = set(model["tags"])
     src = open_source(args.source, args.fov)
@@ -534,13 +606,21 @@ def cmd_align(args):
 
     print(f"Now ROTATE the controller in front of the camera for {args.seconds:.0f} s.")
     print("Twist it about ALL THREE axes -- roll, pitch, yaw.")
-    print("KEEP BOTH TAGS IN VIEW: one tag alone is planar, so its pose is two-fold")
+    print("KEEP 2+ TAGS IN VIEW: one tag alone is planar, so its pose is two-fold")
     print("ambiguous and the tracker can silently sit on the mirrored solution. Only")
-    print("2-tag frames are recorded here -- the counter below is what matters.")
+    print("multi-tag frames are recorded here -- the counter below is what matters.")
+    print("The 3-face box makes this easy: hold a CORNER toward the camera and two or")
+    print("three faces stay visible through most of the rotation.")
     print("Slow, deliberate turns (~40 deg/s) beat fast ones.\n")
+    rr = None
+    if not args.no_rr:
+        import rerun as rr
+        rr.init("pad_imu_align", spawn=True)
+        rr.log("axes", rr.ViewCoordinates.RUB, static=True)
+
     Rs, ts, guess = [], [], None
-    t0 = time.perf_counter()
-    while time.perf_counter() - t0 < args.seconds:
+    axes, t0, last = [], time.perf_counter(), 0.0
+    while (el := time.perf_counter() - t0) < args.seconds:
         frame, K = src.grab()
         if frame is None:
             continue
@@ -551,9 +631,38 @@ def cmd_align(args):
             guess = (R_b, t_b)
             Rs.append(R_b)
             ts.append(time.perf_counter())
-        el = time.perf_counter() - t0
-        print(f"\r  {el:4.1f}s  BOTH-TAG poses {len(Rs):4d}  (tags now: {len(dets)})  "
-              f"imu {imu.n:5d}   ", end="", flush=True)
+
+        # Observability: X is solved from PAIRED angular velocities, so it is only
+        # determined in the directions actually rotated about. Rotate about one axis
+        # only and X is free about that axis -- invisible in the pose count, fatal in
+        # the fit. The eigenvalues of sum(w_hat w_hat^T) measure exactly that span.
+        _, w_now, _ = imu.latest()
+        dps = math.degrees(np.linalg.norm(w_now))
+        if dps > args.min_dps:
+            axes.append(w_now / np.linalg.norm(w_now))
+        cov = np.zeros(3)
+        if len(axes) > 20:
+            ev = np.linalg.eigvalsh(np.array(axes).T @ np.array(axes) / len(axes))
+            cov = np.clip(ev[::-1], 0, None)          # descending, sums to 1
+
+        if rr is not None:
+            rr.set_time("time", duration=el)
+            rr.log("rate/omega_dps", rr.Scalars(dps))
+            rr.log("rate/n_tags", rr.Scalars(float(len(dets))))
+            rr.log("rate/reproj_px", rr.Scalars(float(out[2]) if out else float("nan")))
+            rr.log("coverage/worst_axis", rr.Scalars(float(cov[2])))
+            for i, v in enumerate(cov):
+                rr.log(f"coverage/eig{i}", rr.Scalars(float(v)))
+            if len(axes) > 1 and len(Rs) % 5 == 0:
+                A = np.array(axes[-1500:])
+                rr.log("axes/omega", rr.Points3D(A, radii=0.008,
+                                                 colors=[(90, 170, 255)]))
+        if el - last >= 0.25:
+            last = el
+            bar = "".join("#" if c > 0.15 else ("-" if c > 0.05 else ".") for c in cov)
+            print(f"\r  {el:4.1f}s  poses {len(Rs):4d}  tags {len(dets)}  "
+                  f"|w| {dps:5.1f} dps  axis coverage [{bar}] "
+                  f"worst {cov[2]:.3f}   ", end="", flush=True)
     print()
     src.stop()
     hist = imu.history()
@@ -632,7 +741,7 @@ def cmd_check(args):
     if cal is None:
         print("no saved calibration — this run can still SOLVE one from gravity")
 
-    model = load_model()
+    model = load_model(args.model)
     det = make_detector("DICT_4X4_50")
     keep = set(model["tags"])
     src = open_source(args.source, args.fov)
@@ -845,6 +954,546 @@ def cmd_selftest(args):
     return 0 if ok else 1
 
 
+def _triad(path, R, p, length, colors, labels, radii=None):
+    """Draw a rotation as three arrows from p. R's COLUMNS are the body axes in camera
+    coordinates, so R.T's rows are what Arrows3D wants."""
+    import rerun as rr
+    rr.log(path, rr.Arrows3D(origins=np.tile(np.asarray(p, float), (3, 1)),
+                             vectors=R.T * length, colors=colors, labels=labels,
+                             radii=radii))
+
+
+def cmd_view(args):
+    """Live 3-D: the TAG-measured body frame vs the GYRO-propagated one, side by side.
+
+    The question this answers is not "is X roughly right" (that is `check`) but "do the
+    two sensors still agree as you MOVE, and does their disagreement stay put or grow?"
+
+    Method: anchor the gyro orientation to the vision orientation once, then let the gyro
+    run free -- R_imu <- R_imu @ exp([X w]x dt) -- and plot the residual rotation between
+    the two. A CONSTANT offset means X is slightly off but stable, which is harmless and
+    calibratable. A GROWING offset means gyro bias (or scale), and it is what silently
+    poisons a tag dropout bridge. The distinction is the whole point, so the summary
+    separates drift per second of TIME from drift per degree of ROTATION."""
+    import cv2
+    import rerun as rr
+    import rerun.blueprint as rrb
+    from tag_pose import make_detector, detect, open_source
+    from tag_body import load_model, body_pose
+
+    cal = load_calib()
+    if cal is None:
+        sys.exit("no saved calibration -- run `pad_imu.py align` (or `check --save`) first")
+    X, bias_saved = cal["X"], cal["bias"]
+    imu = PadIMU(bias=None)                 # bias applied below, after we decide which
+    imu.start()
+    time.sleep(0.4)
+
+    # Gyro bias is NOT a one-time calibration -- it moves with temperature and across
+    # power cycles, and the pad sleeps between sessions. A stale bias of even 1 deg/s
+    # is 60 deg of drift per minute, which looks exactly like a bad X while X is fine.
+    # So measure it fresh and SHOW the difference: that difference is the diagnosis.
+    bias = bias_saved
+    if args.bias_seconds > 0:
+        print(f"\n  hold the controller DEAD STILL for {args.bias_seconds:.0f} s "
+              "(measuring gyro bias)...")
+        fresh, sd = imu.measure_bias(args.bias_seconds)
+        d = np.degrees(fresh - bias_saved)
+        moved = float(np.degrees(np.linalg.norm(sd)))
+        print(f"  saved bias {np.round(np.degrees(bias_saved), 2)} deg/s")
+        print(f"  fresh bias {np.round(np.degrees(fresh), 2)} deg/s   "
+              f"(noise {moved:.2f} deg/s)")
+        print(f"  DIFFERENCE {np.round(d, 2)} deg/s  (|d| = {np.linalg.norm(d):.2f})")
+        if moved > 1.0:
+            # A moving pad turns real rotation into "bias" and poisons everything after.
+            print("  !! the pad was NOT still while measuring — that reading is not a "
+                  "bias. Keeping the saved one; re-run and hold it down on the desk.")
+            fresh = bias_saved
+        elif np.linalg.norm(d) > 0.5:
+            print("  -> the SAVED bias is stale. That alone would drift "
+                  f"{np.linalg.norm(d) * 60:.0f} deg/min; using the fresh one.")
+        bias = bias_saved if args.saved_bias else fresh
+    with imu._lock:
+        imu.bias = np.asarray(bias, float)
+
+    run = LOG_ROOT / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run.mkdir(parents=True, exist_ok=True)
+    fcsv = open(run / "view.csv", "w", newline="")
+    wcsv = csv.writer(fcsv)
+    wcsv.writerow(["time_s", "tags", "reproj_px", "spin_dps", "rot_cum_deg",
+                   "disagree_deg", "err_x", "err_y", "err_z",
+                   "wx", "wy", "wz", "ax", "ay", "az"])
+    print(f"  logging to {run}")
+
+    model = load_model(args.model)
+    det = make_detector("DICT_4X4_50")
+    keep = set(model["tags"])
+    src = open_source(args.source, args.fov)
+
+    rr.init("pad_imu_view", spawn=True)
+    rr.send_blueprint(rrb.Blueprint(rrb.Horizontal(
+        rrb.Spatial3DView(origin="world", name="tag (RGB) vs gyro (orange/cyan/magenta)"),
+        rrb.Vertical(
+            rrb.Spatial2DView(origin="cam", name="camera"),
+            rrb.TimeSeriesView(origin="d", name="disagreement (deg)"),
+            rrb.TimeSeriesView(origin="axis", name="which axis drifts (deg)"),
+        ), column_shares=[3, 2])))
+    for nm, col in (("d/total", [235, 90, 60]), ("d/spin_dps", [130, 130, 140]),
+                    ("axis/x", [235, 90, 60]), ("axis/y", [60, 190, 100]),
+                    ("axis/z", [80, 150, 250])):
+        rr.log(nm, rr.SeriesLines(colors=col, names=nm.split("/")[-1]), static=True)
+
+    # Both triads use the SAME colour per axis and the SAME length, so when the sensors
+    # agree the arrows sit exactly on top of each other and you see THREE arrows, not
+    # six. Any split you can see IS the disagreement. Vision is drawn thick, gyro thin.
+    VIS_C = [[235, 60, 60], [60, 200, 90], [70, 140, 255]]
+    IMU_C = [[255, 120, 120], [130, 230, 160], [140, 190, 255]]   # same hues, lighter
+
+    print("\nMove the controller around, keeping the tag in view most of the time.")
+    print("THICK arrows = camera, THIN arrows = gyro, same colour per axis.")
+    print("If they agree you see 3 arrows. If they split, that gap IS the error.")
+    print("Ctrl-C for the drift summary.\n")
+
+    R_imu = None
+    guess = None
+    t_prev = t_anchor = None
+    t0 = time.perf_counter()
+    t_img = 0.0
+    rot_cum = 0.0                       # total rotation travelled, deg
+    hist = []                           # (elapsed, rot_cum, disagreement deg)
+    n_fps, t_fps, hz = 0, time.perf_counter(), 0.0
+    try:
+        while True:
+            frame, K = src.grab()
+            if frame is None:
+                continue
+            t = time.perf_counter()
+            rr.set_time("time", duration=t - t0)
+            _, w, a = imu.latest()
+            dt = 0.0 if t_prev is None else min(t - t_prev, 0.25)
+            t_prev = t
+
+            # propagate the gyro orientation in the BODY frame (right-multiply)
+            w_body = X @ w
+            if R_imu is not None and dt > 0:
+                dR, _ = cv2.Rodrigues(w_body * dt)
+                R_imu = R_imu @ dR
+                rot_cum += math.degrees(np.linalg.norm(w_body) * dt)
+
+            dets = detect(det, frame, keep)
+            out = body_pose(dets, K, model, guess) if len(dets) >= args.min_tags else None
+            ok = out is not None and out[2] <= 4.0
+            if ok:
+                guess = (out[0], out[1])
+                R_vis, p_vis = out[0], out[1]
+                if R_imu is None or (args.reanchor and t - t_anchor >= args.reanchor):
+                    R_imu, t_anchor = R_vis.copy(), t
+                    print(f"\n  anchored gyro to vision at t={t - t0:.1f}s")
+
+            n_fps += 1
+            if t - t_fps >= 1.0:
+                hz, n_fps, t_fps = n_fps / (t - t_fps), 0, t
+                rr.log("d/loop_hz", rr.Scalars(hz))
+            spin = math.degrees(np.linalg.norm(w))
+            rr.log("d/spin_dps", rr.Scalars(spin))
+            # no tag-count series on purpose: the disagreement trace simply GAPS when
+            # vision drops, which says the same thing without a second scale on the plot
+
+            dis = float("nan")
+            if ok and R_imu is not None:
+                p = p_vis
+                _triad("world/vision", R_vis, p, 0.060, VIS_C, ["x", "y", "z"],
+                       radii=0.0018)
+                _triad("world/gyro", R_imu, p, 0.060, IMU_C, [None, None, None],
+                       radii=0.0007)
+                # gravity as the IMU reconstructs it, in camera coords
+                g = R_vis @ X @ a
+                n = np.linalg.norm(g)
+                if n > 1e-6:
+                    rr.log("world/gravity", rr.Arrows3D(
+                        origins=[p], vectors=[g / n * 0.05], colors=[[245, 225, 70]],
+                        labels=["g (from IMU)"]))
+                r, _ = cv2.Rodrigues(R_vis.T @ R_imu)       # residual, in the body frame
+                r = np.degrees(r.ravel())
+                dis = float(np.linalg.norm(r))
+                rr.log("d/total", rr.Scalars(dis))
+                for nm, v in zip("xyz", r):
+                    rr.log(f"axis/{nm}", rr.Scalars(float(v)))
+                hist.append((t - t0, rot_cum, dis))
+            wcsv.writerow([f"{t - t0:.4f}", len(dets),
+                           f"{out[2]:.2f}" if ok else "",
+                           f"{spin:.3f}", f"{rot_cum:.3f}",
+                           f"{dis:.4f}" if dis == dis else "",
+                           *([f"{v:.4f}" for v in r] if dis == dis else ["", "", ""]),
+                           *[f"{v:.6f}" for v in w], *[f"{v:.4f}" for v in a]])
+
+            # Small + jpeg, sent often, beats big + raw sent rarely. Measured on this
+            # machine: raw 1280x720 costs 10.1 ms to send and 83 MB/s of viewer input,
+            # so it was throttled to 2 fps and LOOKED laggy even though detection ran at
+            # 30 Hz. Half size + jpeg costs 1.76 ms, so it can run 10x more often.
+            if not args.no_image and t - t_img >= 1.0 / args.image_hz:
+                t_img = t
+                small = frame if args.rr_scale >= 0.999 else cv2.resize(
+                    frame, None, fx=args.rr_scale, fy=args.rr_scale)
+                rr.log("cam/image", rr.Image(cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
+                                      .compress(jpeg_quality=70))
+
+            print(f"\r  {hz:4.1f} Hz | tags {len(dets)} | spin {spin:5.1f} deg/s | "
+                  f"rotated {rot_cum:6.0f} deg | disagreement "
+                  + (f"{dis:5.2f} deg" if dis == dis else "  --  ") + "   ", end="")
+    except KeyboardInterrupt:
+        print("\n")
+    finally:
+        imu.stop()
+        fcsv.close()
+        try:
+            src.close()
+        except Exception:
+            pass
+
+    if len(hist) < 20:
+        print("not enough paired samples for a drift summary")
+        return
+    H = np.array(hist)
+    el, rot, dis = H[:, 0], H[:, 1], H[:, 2]
+    # Separate the two failure modes: a constant misalignment vs an accumulating one.
+    A_t = np.polyfit(el, dis, 1)
+    A_r = np.polyfit(rot, dis, 1) if np.ptp(rot) > 30 else (float("nan"), float("nan"))
+    print(f"  paired samples      : {len(hist)} over {el[-1]:.0f} s, "
+          f"{rot[-1]:.0f} deg of rotation travelled")
+    print(f"  disagreement        : mean {dis.mean():.2f} deg, "
+          f"median {np.median(dis):.2f}, p90 {np.percentile(dis, 90):.2f}, "
+          f"max {dis.max():.2f}")
+    print(f"  vs TIME             : {A_t[0]:+.3f} deg/s   (offset {A_t[1]:.2f} deg)")
+    if A_r[0] == A_r[0]:
+        print(f"  vs ROTATION         : {A_r[0]:+.4f} deg per deg turned "
+              f"({100 * A_r[0]:+.2f}% scale error)")
+    drifting = abs(A_t[0]) > 0.05
+    print("\n  " + ("DRIFTING -- the offset grows, so this is gyro bias/scale, not a "
+                    "fixed misalignment. Re-run `bias` with the pad dead still."
+                    if drifting else
+                    "STABLE -- the offset stays put, so it is a fixed misalignment in X "
+                    "(harmless for bridging; shrink it with more `check` poses)."))
+    if np.median(dis) > 8:
+        print("  NOTE: the offset itself is large; X is probably still coarse.")
+
+
+SOLO_DEAD_DEG = 5.0                # tilt inside this is "neutral" -- hand tremor, not intent
+SOLO_FULL_DEG = 30.0               # tilt at which the rate command saturates
+SOLO_MAX_MMPS = 200.0              # mm/s at full tilt
+SOLO_G_TAU = 1.0                   # s: how hard gravity pulls the attitude back to level
+
+
+def cmd_solo(args):
+    """IMU ONLY -- no camera, no tags. Compare the two ways to turn a pad into a command.
+
+    Measured on this pad (2026-08-21, stationary so true displacement is zero), position
+    by double-integrating acceleration drifts 8.6 mm @0.5 s, 35 mm @1 s, 145 mm @2 s,
+    330 mm @3 s. It is quadratic because the error is 0.5*g*sin(theta)*t^2 -- gravity
+    leaking through attitude error -- so no amount of clutching rescues a 2 s stroke.
+
+    ORIENTATION has no such problem: 0.10 deg/s of gyro noise, and roll/pitch are pinned
+    by gravity, which never drifts. So this view shows BOTH, honestly:
+
+      * INTEGRATED position (blue trail) -- watch it run away, that is the 8.6 mm/35 mm/145 mm
+      * TILT-TO-RATE (orange trail) -- tilt = velocity, no acceleration integration at all
+
+    Auto-ZUPT stands in for the clutch: hold the pad still and both reset."""
+    import cv2
+    import rerun as rr
+    import rerun.blueprint as rrb
+
+    cal = load_calib()
+    bias = cal["bias"] if cal else None
+    imu = PadIMU(bias=bias)
+    imu.start()
+    time.sleep(0.4)
+    print(f"\n  hold the controller DEAD STILL for {args.bias_seconds:.0f} s "
+          "(measuring gyro bias)...")
+    b, sd = imu.measure_bias(args.bias_seconds)
+    print(f"  bias {np.round(np.degrees(b), 2)} deg/s   "
+          f"noise {np.degrees(np.linalg.norm(sd)):.2f} deg/s")
+
+    run = LOG_ROOT / datetime.now().strftime("%Y-%m-%d_%H-%M-%S_solo")
+    run.mkdir(parents=True, exist_ok=True)
+    fcsv = open(run / "solo.csv", "w", newline="")
+    wcsv = csv.writer(fcsv)
+    wcsv.writerow(["time_s", "hz", "still", "pitch_deg", "roll_deg", "yaw_deg",
+                   "vx", "vy", "vz", "rate_x", "rate_y", "rate_z",
+                   "int_x", "int_y", "int_z", "tilt_x", "tilt_y", "tilt_z"])
+    print(f"  logging to {run}")
+
+    rr.init("pad_imu_solo", spawn=True)
+    rr.send_blueprint(rrb.Blueprint(rrb.Horizontal(
+        rrb.Spatial3DView(origin="world", name="orientation + the two trails"),
+        rrb.Vertical(
+            rrb.TimeSeriesView(origin="tilt", name="tilt (deg)"),
+            rrb.TimeSeriesView(origin="cmd", name="tilt-to-rate command (mm/s)"),
+            rrb.TimeSeriesView(origin="drift", name="integrated-position drift (mm)"),
+        ), column_shares=[3, 2])))
+    for nm, col in (("tilt/pitch", [235, 90, 60]), ("tilt/roll", [60, 190, 100]),
+                    ("tilt/yaw", [80, 150, 250]),
+                    ("cmd/vx", [235, 90, 60]), ("cmd/vy", [60, 190, 100]),
+                    ("cmd/vz", [80, 150, 250]),
+                    ("drift/integrated", [80, 150, 250]),
+                    ("drift/spin_dps", [140, 140, 150])):
+        rr.log(nm, rr.SeriesLines(colors=col, names=nm.split("/")[-1]), static=True)
+
+    # attitude: body -> world, seeded level from the first gravity reading
+    _, _, a0 = imu.latest()
+    a0 = a0 / np.linalg.norm(a0)
+    axis = np.cross(a0, [0.0, 0.0, 1.0])
+    sn = np.linalg.norm(axis)
+    R = (cv2.Rodrigues(axis / sn * math.atan2(sn, float(a0 @ [0.0, 0.0, 1.0])))[0]
+         if sn > 1e-8 else np.eye(3))
+
+    v = np.zeros(3)          # velocity from double integration (the doomed one)
+    p_int = np.zeros(3)      # position from double integration
+    p_tilt = np.zeros(3)     # position from tilt-to-rate (the honest one)
+    trail_i, trail_t = [], []
+    t0 = tprev = time.perf_counter()
+    t_still = None
+    n, t_fps, hz = 0, t0, 0.0
+    print("\n  TILT the controller to drive the orange trail. Hold it STILL to reset both.")
+    print("  Blue trail = double-integrated position. Watch it leave.\n")
+    try:
+        while True:
+            t = time.perf_counter()
+            dt = t - tprev
+            if dt < 1.0 / args.rate:
+                time.sleep(0.001)
+                continue
+            tprev = t
+            n += 1
+            if t - t_fps >= 0.5:
+                hz = n / (t - t_fps); n, t_fps = 0, t
+            rr.set_time("time", duration=t - t0)
+            _, w, a = imu.latest()
+
+            # ---- attitude: gyro integrates, gravity corrects roll/pitch only ----
+            R = R @ cv2.Rodrigues(w * dt)[0]
+            an = np.linalg.norm(a)
+            if an > 1e-6:
+                meas = a / an                       # gravity direction, body frame
+                pred = R.T @ np.array([0.0, 0.0, 1.0])
+                err = np.cross(meas, pred)          # rotation that levels the estimate
+                R = R @ cv2.Rodrigues(err * (dt / SOLO_G_TAU))[0]
+
+            still = (math.degrees(np.linalg.norm(w)) < 2.0 and abs(an - G) < 0.35)
+            t_still = t_still if (still and t_still is not None) else (t if still else None)
+
+            # ---- (1) the doomed one: double-integrate acceleration ----
+            a_world = R @ a - np.array([0.0, 0.0, G])
+            if still and t_still is not None and t - t_still > 0.4:
+                v[:] = 0.0                          # ZUPT stands in for a clutch
+                p_int[:] = 0.0
+                p_tilt[:] = 0.0
+                trail_i.clear(); trail_t.clear()
+            else:
+                v = v + a_world * dt
+                p_int = p_int + v * dt
+
+            # ---- (2) the honest one: tilt IS the velocity ----
+            fwd, lft = R[:, 0], R[:, 1]             # controller axes, in world
+            pitch = math.degrees(math.asin(float(np.clip(fwd[2], -1, 1))))
+            roll = math.degrees(math.asin(float(np.clip(lft[2], -1, 1))))
+            yaw = math.degrees(math.atan2(R[1, 0], R[0, 0]))
+
+            def rate(deg):
+                m = max(0.0, abs(deg) - SOLO_DEAD_DEG) / (SOLO_FULL_DEG - SOLO_DEAD_DEG)
+                return math.copysign(min(m, 1.0) ** 2 * SOLO_MAX_MMPS, deg)
+
+            cmd = np.array([rate(-pitch), rate(-roll), 0.0])   # z left for a stick/button
+            p_tilt = p_tilt + cmd * dt * 1e-3
+
+            trail_i.append(p_int.copy()); trail_t.append(p_tilt.copy())
+            trail_i[:] = trail_i[-400:]; trail_t[:] = trail_t[-400:]
+
+            rr.log("world/pad", rr.Arrows3D(
+                origins=np.tile(p_tilt, (3, 1)), vectors=R.T * 0.05,
+                colors=[[235, 60, 60], [60, 200, 90], [70, 140, 255]],
+                labels=["fwd", "left", "up"]))
+            if len(trail_i) > 1:
+                rr.log("world/integrated", rr.LineStrips3D(
+                    [np.array(trail_i)], colors=[[80, 150, 250]]))
+                rr.log("world/tilt_rate", rr.LineStrips3D(
+                    [np.array(trail_t)], colors=[[255, 165, 30]]))
+            for nm, val in (("tilt/pitch", pitch), ("tilt/roll", roll), ("tilt/yaw", yaw),
+                            ("cmd/vx", cmd[0]), ("cmd/vy", cmd[1]), ("cmd/vz", cmd[2]),
+                            ("drift/integrated", float(np.linalg.norm(p_int)) * 1e3),
+                            ("drift/spin_dps", math.degrees(np.linalg.norm(w)))):
+                rr.log(nm, rr.Scalars(float(val)))
+
+            wcsv.writerow([f"{t - t0:.4f}", f"{hz:.1f}", int(still),
+                           f"{pitch:.2f}", f"{roll:.2f}", f"{yaw:.2f}",
+                           *[f"{x:.4f}" for x in v], *[f"{x:.1f}" for x in cmd],
+                           *[f"{x:.4f}" for x in p_int], *[f"{x:.4f}" for x in p_tilt]])
+            print(f"\r  {hz:5.1f} Hz | {'STILL' if still else 'moving':6s} | "
+                  f"pitch {pitch:+6.1f} roll {roll:+6.1f} | cmd [{cmd[0]:+6.0f}"
+                  f"{cmd[1]:+6.0f}] mm/s | integrated {np.linalg.norm(p_int) * 1e3:7.1f} mm  ",
+                  end="")
+    except KeyboardInterrupt:
+        print("\n")
+    finally:
+        imu.stop()
+        fcsv.close()
+    print(f"  log: {run}")
+
+
+# ── gyro scale + bias from gravity alone (no camera, no tag model, no X) ──────────
+
+def still_segments(t, w, a, max_dps=12.0, g_tol=0.35, min_s=0.25):
+    """Index spans where the pad is quasi-static: slow AND |a| ~ g (so `a` IS gravity)."""
+    ok = (np.linalg.norm(w, axis=1) < math.radians(max_dps)) & \
+         (np.abs(np.linalg.norm(a, axis=1) - G) < g_tol)
+    segs, i = [], 0
+    while i < len(ok):
+        if not ok[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(ok) and ok[j]:
+            j += 1
+        if t[j - 1] - t[i] > min_s:
+            segs.append((i, j))
+        i = j
+    return segs
+
+
+def merge_segments(t, a, segs, same_deg=8.0):
+    """Join rests that were split apart.
+
+    One long rest can dip below the stillness test for a few samples (a knock on the
+    table, sensor noise) and come back as two or three segments. Those pieces are the
+    SAME pose, so the "rotation" between them is ~0 deg and they were being thrown away
+    -- which is how a good 60 s recording produced 13 rests and 0 usable pairs."""
+    out = []
+    for s0, s1 in segs:
+        g = a[s0:s1].mean(0); g /= np.linalg.norm(g)
+        if out:
+            p0, p1, pg = out[-1]
+            if math.degrees(math.acos(np.clip(pg @ g, -1, 1))) < same_deg:
+                out[-1] = (p0, s1, (pg + g) / np.linalg.norm(pg + g))
+                continue
+        out.append((s0, s1, g))
+    return out
+
+
+def gravity_transitions(t, w, a, segs, lo_deg=15.0, hi_deg=150.0, max_gap=8.0,
+                        report=False):
+    """Consecutive still poses far enough apart to measure a rotation between them."""
+    merged = merge_segments(t, a, segs)
+    out, why = [], Counter()
+    for (a0, a1, g1), (b0, b1, g2) in zip(merged[:-1], merged[1:]):
+        sep = math.degrees(math.acos(np.clip(g1 @ g2, -1, 1)))
+        gap = t[b0] - t[a1]
+        if sep <= lo_deg:
+            why["turned too little (<15 deg)"] += 1
+        elif sep >= hi_deg:
+            why["turned too far (>150 deg)"] += 1
+        elif gap >= max_gap:
+            why[f"move took too long (>{max_gap:.0f} s)"] += 1
+        else:
+            out.append((a1, b0, g1, g2, sep))
+    if report:
+        print(f"  {len(segs)} rests -> {len(merged)} after joining split ones")
+        for k, v in why.items():
+            print(f"    dropped {v}: {k}")
+    return out
+
+
+def fit_gyro(t, w_raw, pairs):
+    """Solve gyro scale + bias so integrating between still poses predicts gravity.
+
+    Gravity is a known direction the accelerometer reads directly, so this needs no
+    camera and no X. Scale and bias must be solved TOGETHER: a bias is a fixed rate and
+    a scale is multiplicative, and fitting either alone absorbs part of the other
+    (measured: scale alone 10.77 deg residual, both 1.72 deg)."""
+    import cv2
+    from scipy.optimize import least_squares
+
+    def integ(lo, hi, scale, b):
+        R = np.eye(3)
+        for k in range(lo, hi):
+            dt = t[k + 1] - t[k]
+            if 0 < dt < 0.1:
+                R = R @ cv2.Rodrigues((w_raw[k] - b) * scale * dt)[0]
+        return R
+
+    def resid(p):
+        return np.concatenate([integ(lo, hi, p[0], p[1:4]).T @ g1 - g2
+                               for lo, hi, g1, g2, _ in pairs])
+
+    r = least_squares(resid, [1.0, 0.0, 0.0, 0.0], method="lm")
+    per = [math.degrees(2 * math.asin(min(1.0, np.linalg.norm(v) / 2)))
+           for v in resid(r.x).reshape(-1, 3)]
+    return float(r.x[0]), r.x[1:4], float(np.median(per))
+
+
+def cmd_gyrocal(args):
+    """Measure the gyro's scale and bias against gravity. No camera needed."""
+    imu = PadIMU(gyr_scale=1.0)             # solve the ABSOLUTE scale, not a residual one
+    imu.start()
+    time.sleep(0.4)
+    print(f"Driver reports {imu.gyr_per_dps:.0f} gyro units per deg/s.\n")
+    print(f"Put the controller ON THE TABLE. For the next {args.seconds:.0f} s, every few")
+    print("seconds tip it onto a DIFFERENT face and let it rest ~1.5 s before moving")
+    print("again. Resting is what makes the accelerometer read pure gravity; the rests")
+    print("are the measurement, the motion between them is what is being calibrated.\n")
+    imu.keep_history = True
+    imu.history()
+    t0 = time.perf_counter()
+    while (el := time.perf_counter() - t0) < args.seconds:
+        time.sleep(0.25)
+        print(f"\r  {el:4.1f}s  imu {imu.n:6d}   ", end="", flush=True)
+    hist = imu.history()
+    imu.stop()
+    print()
+
+    t = np.array([h[0] for h in hist])
+    w = np.array([h[1] for h in hist])
+    a = np.array([h[2] for h in hist])
+    np.savez(GYRO_RAW, t=t, w=w, a=a)          # so a failed run can be examined
+    segs = still_segments(t, w, a)
+    pairs = gravity_transitions(t, w, a, segs, report=True)
+    print(f"  -> {len(pairs)} usable transitions "
+          f"({np.mean([p[4] for p in pairs]) if pairs else 0:.0f} deg mean)")
+    print(f"  raw saved -> {GYRO_RAW}")
+    if len(pairs) < 5:
+        sys.exit("  not enough still->move->still cycles. Rest it LONGER between moves.")
+
+    scale, bias, res = fit_gyro(t, w, pairs)
+    def resid_at(sc, b):
+        import cv2
+        out = []
+        for lo, hi, g1, g2, _ in pairs:
+            R = np.eye(3)
+            for k in range(lo, hi):
+                dt = t[k+1] - t[k]
+                if 0 < dt < 0.1:
+                    R = R @ cv2.Rodrigues((w[k] - b) * sc * dt)[0]
+            out.append(math.degrees(math.acos(np.clip((R.T @ g1) @ g2, -1, 1))))
+        return float(np.median(out))
+    print(f"\n  scale     {scale:.4f}  -> {imu.gyr_per_dps/scale:.0f} units per deg/s")
+    print(f"  bias      {np.degrees(bias).round(2)} deg/s "
+          f"(|b| {np.degrees(np.linalg.norm(bias)):.2f})")
+    print(f"  residual  {res:.2f} deg   (uncorrected: {resid_at(1.0, np.zeros(3)):.2f} deg)")
+    if res > 5.0:
+        print("\n  REJECTED - residual too high to trust. Not saving.")
+        print("     Usually: it never really came to rest between moves.")
+        return 1
+    d = json.loads(CALIB.read_text()) if CALIB.exists() else {}
+    d["gyr_scale"] = scale
+    d["bias"] = list(map(float, bias))
+    d["gyro_residual_deg"] = res
+    CALIB.parent.mkdir(parents=True, exist_ok=True)
+    CALIB.write_text(json.dumps(d, indent=2))
+    print(f"\n  saved scale+bias -> {CALIB}")
+    if "X" in d and d["X"] is not None:
+        print("  NOTE: the stored X was solved with the OLD gyro scale -- re-run `align`.")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -855,6 +1504,8 @@ def main():
     a = sub.add_parser("align")
     a.add_argument("--source", default="9")
     a.add_argument("--fov", type=float, default=70.0)
+    a.add_argument("--model", default=str(BODY_MODEL),
+                   help="tag body model (default: the 3-face box)")
     a.add_argument("--seconds", type=float, default=30.0)
     a.add_argument("--min-dps", type=float, default=25.0)
     a.add_argument("--min-tags", type=int, default=2,
@@ -863,10 +1514,13 @@ def main():
                    help="seconds per rotation-increment pair")
     a.add_argument("--replay", action="store_true",
                    help="re-solve from the last recording instead of recording anew")
+    a.add_argument("--no-rr", action="store_true", help="no live Rerun view")
     a.set_defaults(fn=lambda ar: cmd_replay(ar) if ar.replay else cmd_align(ar))
     c = sub.add_parser("check")
     c.add_argument("--source", default="9")
     c.add_argument("--fov", type=float, default=70.0)
+    c.add_argument("--model", default=str(BODY_MODEL),
+                   help="tag body model (default: the 3-face box)")
     c.add_argument("--poses", type=int, default=25)
     c.add_argument("--hold", type=float, default=0.6, help="seconds of stillness per pose")
     c.add_argument("--still-dps", type=float, default=4.0)
@@ -878,6 +1532,31 @@ def main():
     c.add_argument("--replay", action="store_true",
                    help="re-solve from the last banked poses instead of recording anew")
     c.set_defaults(fn=lambda ar: cmd_check_replay(ar) if ar.replay else cmd_check(ar))
+    v = sub.add_parser("view")
+    v.add_argument("--source", default="9")
+    v.add_argument("--fov", type=float, default=70.0)
+    v.add_argument("--model", default=str(BODY_MODEL),
+                   help="tag body model (default: the 3-face box)")
+    v.add_argument("--min-tags", type=int, default=1)
+    v.add_argument("--reanchor", type=float, default=0.0,
+                   help="re-anchor the gyro to vision every N s (0 = free-run, shows drift)")
+    v.add_argument("--no-image", action="store_true")
+    v.add_argument("--image-hz", type=float, default=15.0,
+                   help="how often the camera picture goes to Rerun")
+    v.add_argument("--rr-scale", type=float, default=0.5,
+                   help="size of that picture (1.0 = full; detection always uses full)")
+    v.add_argument("--bias-seconds", type=float, default=3.0,
+                   help="re-measure gyro bias at startup (0 = trust the saved one)")
+    v.add_argument("--saved-bias", action="store_true",
+                   help="use the saved bias even if the fresh measurement disagrees")
+    v.set_defaults(fn=cmd_view)
+    so = sub.add_parser("solo")
+    so.add_argument("--rate", type=float, default=100.0, help="loop rate cap (Hz)")
+    so.add_argument("--bias-seconds", type=float, default=3.0)
+    so.set_defaults(fn=cmd_solo)
+    g = sub.add_parser("gyrocal")
+    g.add_argument("--seconds", type=float, default=60.0)
+    g.set_defaults(fn=cmd_gyrocal)
     sub.add_parser("selftest").set_defaults(fn=cmd_selftest)
     args = ap.parse_args()
     sys.exit(args.fn(args) or 0)

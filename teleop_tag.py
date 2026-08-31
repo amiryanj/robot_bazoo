@@ -102,7 +102,7 @@ MAX_TCP_SPEED = 0.30               # m/s ceiling on the COMMANDED tcp. This is t
 DIAG_HZ = 10.0                     # Rerun scalar rate for DIAGNOSTICS. ~30 series at
                                    # full loop rate is what makes the viewer expensive
                                    # to redraw; 10 Hz is plenty to read a plot by eye
-IMG_HZ = 2.0                       # Rerun image rate. It is for eyeballing, not
+IMG_HZ = 15.0                      # Rerun image rate. It is for eyeballing, not
                                    # control: encoding + the viewer's GPU work at
                                    # full rate competes with the MuJoCo window.
                                    # It is also ~95% of everything Rerun retains --
@@ -652,6 +652,8 @@ def main():
                     help="ignore the controller's built-in IMU even if calibrated")
     ap.add_argument("--no-rr-images", action="store_true",
                     help="no camera images in Rerun (plots only) — ~95%% less data kept")
+    ap.add_argument("--rr-scale", type=float, default=0.5,
+                    help="size of the Rerun picture (1.0 = full; detection uses full)")
     ap.add_argument("--no-log", action="store_true", help="skip the episode CSV")
     ap.add_argument("--dry-run", action="store_true", help="no robot; verify the mapping")
     args = ap.parse_args()
@@ -1071,12 +1073,15 @@ def main():
                 rr.log("world/cam",
                        rr.Pinhole(image_from_camera=Km(K),
                                   resolution=[frame.shape[1], frame.shape[0]]))
+                sc = args.rr_scale
+                small = frame if sc >= 0.999 else cv2.resize(frame, None, fx=sc, fy=sc)
                 rr.log("world/cam/image",
-                       rr.Image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                       rr.Image(cv2.cvtColor(small, cv2.COLOR_BGR2RGB))
                          .compress(jpeg_quality=70))
                 if view is not None and (vf := view.latest()) is not None:
+                    vs = vf if sc >= 0.999 else cv2.resize(vf, None, fx=sc, fy=sc)
                     rr.log(f"view/{args.view}",
-                           rr.Image(cv2.cvtColor(vf, cv2.COLOR_BGR2RGB))
+                           rr.Image(cv2.cvtColor(vs, cv2.COLOR_BGR2RGB))
                              .compress(jpeg_quality=70))
             diag = t - t_diag >= 1.0 / DIAG_HZ
             if diag:

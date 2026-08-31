@@ -199,12 +199,27 @@ SmolVLA training+inference; big-VLA (7B) training needs the cloud.
 - `pad_imu.py` — the controller's own 6-axis IMU as a teleop sensor: evdev reader
   (`PadIMU`), the IMU→tag-body extrinsic `X`, and a 9-state linear KF (position,
   velocity, **accel bias**) that bridges tag dropouts. Subcommands `probe`, `bias`,
-  `align`, `check`, `selftest`. Calibration → `outputs/calib/pad_imu.json`.
+  `align`, `check`, `view`, `solo`, `gyrocal`, `selftest`. Calibration →
+  `outputs/calib/pad_imu.json` (X, bias, gyro scale). `gyrocal` measures the gyro's
+  scale + bias against gravity with NO camera; `align` now refuses a bias measured
+  while the pad is moving, and shows live axis coverage (X is only observable in the
+  directions you actually rotate about).
 - `vision/tag_pose.py` — **the base tag layer**: camera sources (`Webcam`, `RS`,
   `open_source`), the ArUco detector wrapper (`make_detector`, `detect`) and single-tag
   `SOLVEPNP_IPPE_SQUARE` PnP. Everything tag-shaped imports this.
 - `vision/tag_body.py` — rigid **multi-tag body model** (bundle-adjusted) so any one
-  visible tag yields the same body pose. Body frame = reference tag id 13.
+  visible tag yields the same body pose. Body frame = reference tag id 13. Used by the
+  OLD two-tag joystick; the box below supersedes it but reuses `load_model`/`body_pose`.
+- `vision/box_tags.py` — **the 3-face tag box** on the hand-held joystick (ids 7/11/15,
+  `DICT_4X4_50`, 28 mm squares on a 32 mm half-box). Modes: `ident` (scan dictionaries,
+  report ids + co-visibility), `debug` (live Rerun: green = decoded, red = quad found but
+  NOT decoded), `window` (same in a pygame window — cv2 here is HEADLESS, no `imshow`),
+  `capture` + `fit` (measure the real face geometry → `box_body.json`), `show` (3-D of the
+  fitted model vs the ideal cube). `fit` resolves the per-pair flip by LOOP CLOSURE, not
+  by vote count: both IPPE candidates cluster at ~25% each and are indistinguishable by
+  count, but only the true set satisfies T(a→b)·T(b→c) = T(a→c) (0.25 mm vs 3.72 mm).
+  Measured: faces land on three orthogonal axes to <1°, and sit 1.17 mm proud of an ideal
+  corner (panel thickness — lateral +7.3%, axial +0.4%, so the 28 mm tag size is right).
 
 **Vision (perception, WIP):**
 - `vision/capture_frame.py` — grab one aligned color+depth+intrinsics frame from the
@@ -367,14 +382,25 @@ override) — edit it (not EEPROM) to change standing gains.
       were no-ops — fixed-point break is bit-identical and 4.4× faster); `ms_detect`
       (28.8 ms, full 1280×720 + subpix) is now the largest single cost. Hardware is NOT
       the constraint (i9-13900H, 33 GFLOP/s single-thread).
-      **Top blocker: tag coverage** — `tags == 2` has been 0% in every run, so only one
-      hand orientation is trackable, and ~half of all hand motion happens during
-      undetected blind gaps (28 gaps, mean 0.80 s, 68% over the 0.4 s timeout) and is
-      silently discarded. That, not latency, is what makes the arm feel like it drifts.
-- [ ] **Tag id collision** — desk anchor tag (`cam_calib.py`) and joystick reference tag
-      (`joystick_body.json`) are both `DICT_4X4_50` **id 13** at 27.4 mm. Harmless in
-      normal use (different cameras); `cam_calib.py recal` will mis-anchor if the
-      controller sits in the Realsense's view. Renumber when the tags are reprinted.
+      **Tag coverage — SOLVED 2026-08-31** by replacing the two loose tags with a
+      3-face tag box (below): `tags >= 2` went from 0.4% to 75.5% of frames.
+- [x] **3-face tag box + IMU calibration (2026-08-31)** — the hand-held marker is now a
+      32 mm half-box with one tag per face, `DICT_4X4_50` ids **7, 11, 15**, 28 mm black
+      square. Built and measured with `vision/box_tags.py` (`ident` → `capture` → `fit` →
+      `show`). Model → `outputs/calib/box_body.json` (same schema as `tag_body.load_model`;
+      `pad_imu.py --model` points at it by default). Two or more faces are visible 75.5% of
+      the time, which makes the point set non-planar and kills the planar two-fold
+      ambiguity that used to flip the old single-tag pose.
+      **Also fixed a real sensor error: the Pro Controller gyro reads ~12% HIGH.** The
+      `hid_nintendo` resolution of 14247 units/°/s should be ~16200. Found twice,
+      independently — vision (tag rotation vs gyro, ratio 0.876) and gravity alone
+      (still→still accelerometer transitions, no camera, 0.882). Correcting scale AND
+      bias together takes the gravity residual from 14.9° to 1.5°. Re-measure per
+      controller with `pad_imu.py gyrocal` (no camera needed, 60 s). With that fixed,
+      four `align` runs agree to **1.34° average / 1.81° worst** (before: 43°), and the
+      live camera-vs-gyro gap is **1.37°** with 2+ tags.
+- [x] **Tag id collision — gone.** The joystick tags are now ids 7/11/15, so nothing
+      clashes with the finger tags (1, 2) or the desk anchor (13).
 - [ ] Realsense + wrist cam USB bandwidth (works alone, stalls together)
 - [ ] Collect sim episodes → cloud ACT training (plan exists)
 
