@@ -80,8 +80,11 @@ These are the rules that keep a fresh session from breaking things:
   recalibrate unless the calibration file is missing — both are already done.
 - **The servo-gain fix in `configure()` is load-bearing — do not revert it.** The
   patched `so_follower.py` applies per-motor gains from `config/gains.json`
-  on every connect (currently P=32 I=0 **D=200** on shoulder_pan/lift/elbow — tuned
-  2026-06-11 against wrist-IMU ringing; default P=32 I=0 D=32 elsewhere). Stock
+  on every connect (**the file currently holds P=32 I=0 D=64** on shoulder_pan/lift/
+  elbow; default P=32 I=0 D=32 elsewhere). NOTE: the 2026-06-11 tuning below concluded
+  **D=200**, but that value is NOT in `config/gains.json` and never has been in tracked
+  history — either it was never written back, or the note overstates the result. Check on
+  the bench before changing it; the file is applied on every connect. Stock
   lerobot wrote P=16, which left the arm unable to lift against gravity. Lives in
   `patches/lerobot_local.patch` (see below). Note this also means **EEPROM gains are
   reset from gains.json on every connect** — to keep a tuning result, put it in that
@@ -311,7 +314,8 @@ beyond the encoder ceiling you can still merge `station.py`'s synced CSVs on `ti
 **Real-arm findings (2026-06-11, 7.8 V):** the after-stop oscillation seen in teleop is
 an **underdamped servo loop** (factory D=32): 5–11 % overshoot and a 1–2 s wrist
 ring-down at ~3–6 Hz on the big joints, worst on gravity-loaded `shoulder_lift`/
-`elbow_flex`. Fix: **P=32 I=0 D=200** (now in `gains.json`) → overshoot ≈0 %, ring-down
+`elbow_flex`. Fix measured: **P=32 I=0 D=200** (NOT in `gains.json` — the file holds
+D=64; see the Conventions note) → overshoot ≈0 %, ring-down
 dies into the noise floor, elbow micro-hunting gone (residual 0.45→0.20 m/s²), rise only
 ~35–90 ms slower. Two non-fixes learned: **I>0 causes limit-cycle hunting** (integrator
 vs stiction — Optuna picks it to please steady-state cost; keep I=0), and there is an
@@ -348,8 +352,9 @@ override) — edit it (not EEPROM) to change standing gains.
       the gripper-tag `tag_handeye.py` (deleted — left a ~10° tilt). Verify with `scene_align.py`.
 - [x] **Real-arm tuning done (2026-06-11)** — `calibrate.py` now records the wrist IMU
       per capture; diagnosed the after-stop oscillation (underdamped loop + gravity)
-      and fixed it with **D=200** on pan/lift/elbow, persisted via `gains.json`
-      (applied on every connect by the patched `configure()`). See Tuning workflow.
+      and measured **D=200** on pan/lift/elbow as the fix. `gains.json` holds **D=64** --
+      the tuned value was never persisted there. Re-verify on the bench before changing
+      it (the file is applied on every connect). See Tuning workflow.
 - [~] **Scripted pick (WIP)** — `pick_ball.py`: GDINO "basketball." detection (the
       vendored basketball.pt scores ~0 on the mini ball vs white plate), depth →
       handeye → base frame (z from depth — ball may sit on a holder; the scene has
