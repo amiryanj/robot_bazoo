@@ -28,6 +28,8 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "vision"))
 
+from config import ARM_PORT, ROBOT_ID   # noqa: E402
+
 HANDEYE = ROOT / "outputs/calib/handeye.json"
 
 
@@ -133,7 +135,7 @@ def main():
     rr.init("ball_cal_teleop", spawn=True)
     cam_thread = CamThread(R_cb, t_cb, detector); cam_thread.start()
 
-    robot = SOFollower(SOFollowerRobotConfig(port="/dev/ttyACM1", id="so101", cameras={}))
+    robot = SOFollower(SOFollowerRobotConfig(port=ARM_PORT, id=ROBOT_ID, cameras={}))
     robot.connect()
     goal = read_angles(robot)
     smoother = DeltaSmoother(alpha=0.15); deb = ButtonDebouncer()

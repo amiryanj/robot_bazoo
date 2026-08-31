@@ -45,10 +45,10 @@ from gamepad_utils import (
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
-SCENE_XML   = "/home/javad/workspace/lerobot_all/SO-ARM100/Simulation/SO101/scene_sim.xml"
+from config import SCENE_SIM_XML as SCENE_XML, DATASETS
 FPS         = 30
 HF_REPO_ID  = "mgh-ja-1395/so101-sim-ball"
-DATASET_ROOT = Path("/home/javad/workspace/lerobot_all/datasets/so101-sim-ball")
+DATASET_ROOT = DATASETS / "so101-sim-ball"
 TASK        = "push the orange ball with the robot arm"
 
 BALL_INIT   = [0.22, 0.0, 0.02, 1.0, 0.0, 0.0, 0.0]  # xyz + quaternion (wxyz)

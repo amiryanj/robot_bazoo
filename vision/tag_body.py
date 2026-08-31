@@ -40,6 +40,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vision"))
 
+from config import HAND_CAM   # noqa: E402
+
 from tag_pose import Webcam, make_detector, detect, open_source   # noqa: E402
 
 DICT = "DICT_4X4_50"               # both real ids are < 50; 50 codes sit far apart, so
@@ -515,7 +517,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", nargs="?", choices=["capture", "solve", "view"])
-    ap.add_argument("--source", default="9")
+    ap.add_argument("--source", default=HAND_CAM)
     ap.add_argument("--fov", type=float, default=70.0)
     ap.add_argument("--seconds", type=float, default=60.0)
     ap.add_argument("--samples", default=str(SAMPLES))

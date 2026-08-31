@@ -415,8 +415,11 @@ override) — edit it (not EEPROM) to change standing gains.
 
 Refactor backlog (small, not urgent — the layering is mostly right: one IMU parser,
 one gamepad layer, one gains source, one tuning library):
-- [ ] Shared constants (`PORT`, output roots) are duplicated in `station.py` /
-      `calibrate.py` — hoist into one small config module / settings file
+- [x] ~~Shared constants duplicated~~ — done 2026-08-31: `config.py` at the repo root is
+      the single source for the arm port, robot id, Realsense serial, webcam indices,
+      output roots and the MuJoCo scene paths. It also removed 8 hardcoded
+      `/home/javad/workspace/lerobot_all/...` absolute paths, which made the repo
+      unusable from any other checkout.
 - [ ] Two IMU sinks duplicate the align-to-host-clock logic (`station.imu_loop`,
       `servo_tuning.ImuRecorder`) — unify into one recorder with pluggable sinks
 - [ ] `gains.json`: add named per-mode profiles (teleop / point-to-point / VLA)

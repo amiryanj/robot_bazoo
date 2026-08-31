@@ -62,6 +62,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+from config import HAND_CAM   # noqa: E402
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vision"))
 
 CALIB = ROOT / "outputs/calib/pad_imu.json"
@@ -1502,7 +1504,7 @@ def main():
     b = sub.add_parser("bias"); b.add_argument("--seconds", type=float, default=2.0)
     b.set_defaults(fn=cmd_bias)
     a = sub.add_parser("align")
-    a.add_argument("--source", default="9")
+    a.add_argument("--source", default=HAND_CAM)
     a.add_argument("--fov", type=float, default=70.0)
     a.add_argument("--model", default=str(BODY_MODEL),
                    help="tag body model (default: the 3-face box)")
@@ -1517,7 +1519,7 @@ def main():
     a.add_argument("--no-rr", action="store_true", help="no live Rerun view")
     a.set_defaults(fn=lambda ar: cmd_replay(ar) if ar.replay else cmd_align(ar))
     c = sub.add_parser("check")
-    c.add_argument("--source", default="9")
+    c.add_argument("--source", default=HAND_CAM)
     c.add_argument("--fov", type=float, default=70.0)
     c.add_argument("--model", default=str(BODY_MODEL),
                    help="tag body model (default: the 3-face box)")
@@ -1533,7 +1535,7 @@ def main():
                    help="re-solve from the last banked poses instead of recording anew")
     c.set_defaults(fn=lambda ar: cmd_check_replay(ar) if ar.replay else cmd_check(ar))
     v = sub.add_parser("view")
-    v.add_argument("--source", default="9")
+    v.add_argument("--source", default=HAND_CAM)
     v.add_argument("--fov", type=float, default=70.0)
     v.add_argument("--model", default=str(BODY_MODEL),
                    help="tag body model (default: the 3-face box)")

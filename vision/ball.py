@@ -23,6 +23,9 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import VISION_OUT   # noqa: E402
+
 # Orange mini-basketball in HSV (OpenCV H is 0-180). Tuned on the 01-50-23 frame;
 # wide enough for the ball, tight enough to reject the red arm (H~0) and wood (low S).
 ORANGE_LO = np.array([5, 110, 90])
@@ -120,7 +123,7 @@ def main():
     if len(sys.argv) > 1:
         d = sys.argv[1]
     else:
-        caps = sorted(glob.glob("/home/javad/workspace/lerobot_all/outputs/vision/*"))
+        caps = sorted(glob.glob(str(VISION_OUT / "*")))
         d = caps[-1]
     print(f"frame: {d}")
     color, depth, K = load_frame(d)

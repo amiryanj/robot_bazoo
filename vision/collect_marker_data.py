@@ -27,6 +27,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vision"))
 
+from config import ARM_PORT   # noqa: E402
+
 # clear-air box for the TCP (base frame, metres): central, well above plate + ball
 # (ball-on-cylinder sits at ~(0.30, -0.14), top ~z+0.02 — box stays clear of it)
 BOX_X = (0.15, 0.27)
@@ -63,7 +65,7 @@ def candidate_poses(kin, n_target):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--poses", type=int, default=18)
-    ap.add_argument("--port", default="/dev/ttyACM1")
+    ap.add_argument("--port", default=ARM_PORT)
     args = ap.parse_args()
 
     import cv2

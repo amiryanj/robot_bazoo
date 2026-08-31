@@ -42,6 +42,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from pick_ball import BallDetector, Kin, MOTOR_NAMES, run_grasp
 from gamepad_utils import graceful_shutdown
+from config import ARM_PORT
 
 FPS = 10
 REPO_ID = "mgh-ja-1395/so101-pick-ball"
@@ -134,7 +135,7 @@ def main():
     ap.add_argument("--no-wrist", action="store_true", help="Top-down Realsense only.")
     ap.add_argument("--overwrite", action="store_true", help="Delete the dataset and start fresh.")
     ap.add_argument("--push", action="store_true", help="Push to the HF Hub on exit.")
-    ap.add_argument("--port", default="/dev/ttyACM1")
+    ap.add_argument("--port", default=ARM_PORT)
     args = ap.parse_args()
 
     use_wrist = not args.no_wrist

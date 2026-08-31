@@ -28,7 +28,7 @@ from scipy.signal import butter, filtfilt, welch, find_peaks
 
 SCALE = 0.038246                 # m/s² per LSB
 G = 9.80665
-XML = "/home/javad/workspace/lerobot_all/SO-ARM100/Simulation/SO101/scene.xml"
+from config import SCENE_XML as XML
 JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
 IMU_LINK_BODY = "gripper"        # body that rotates with wrist_roll (carries the IMU)
 HP_HZ = 3.0                      # high-pass cutoff: gravity/orientation < this, vibration above

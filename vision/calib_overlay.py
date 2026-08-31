@@ -22,6 +22,8 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "vision"))
+
+from config import ARM_PORT   # noqa: E402
 from realsense import Realsense, backproject
 
 ZP = -0.030                     # plate height in base frame (m), ~ -29mm
@@ -209,7 +211,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--park", action="store_true", help="curl the arm up out of frame first")
     ap.add_argument("--yaw", type=float, default=None, help="manual yaw in deg (else auto)")
-    ap.add_argument("--port", default="/dev/ttyACM1")
+    ap.add_argument("--port", default=ARM_PORT)
     args = ap.parse_args()
 
     robot = None

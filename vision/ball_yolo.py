@@ -25,6 +25,8 @@ import cv2
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import VISION_OUT   # noqa: E402
 from ball import load_frame, deproject, fit_table_plane, WORKSPACE_Z  # noqa: E402
 
 MODEL = Path(__file__).resolve().parent / "models" / "basketball.pt"
@@ -92,7 +94,7 @@ def main():
     if len(sys.argv) > 1:
         d = sys.argv[1]
     else:
-        caps = sorted(glob.glob("/home/javad/workspace/lerobot_all/outputs/vision/*"))
+        caps = sorted(glob.glob(str(VISION_OUT / "*")))
         d = caps[-1]
     print(f"frame: {d}")
     color, depth, K = load_frame(d)

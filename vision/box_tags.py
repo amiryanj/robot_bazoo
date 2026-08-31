@@ -29,6 +29,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vision"))
 
+from config import HAND_CAM   # noqa: E402
+
 from tag_pose import make_detector, detect, open_source            # noqa: E402
 from tag_body import candidates                                   # noqa: E402
 
@@ -557,7 +559,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", nargs="?", default="ident",
                     choices=["ident", "debug", "window", "capture", "fit", "show"])
-    ap.add_argument("--source", default="9", help="V4L2 index, or 'realsense'")
+    ap.add_argument("--source", default=HAND_CAM, help="V4L2 index, or 'realsense'")
     ap.add_argument("--fov", type=float, default=70.0)
     ap.add_argument("--dict", help="skip the dictionary scan and use this one")
     ap.add_argument("--seconds", type=float, default=30.0)
