@@ -50,7 +50,7 @@ def main():
     ap.add_argument("--port", default="/dev/ttyACM1")
     args = ap.parse_args()
 
-    from handeye_calib import Realsense
+    from realsense import Realsense
     from pick_ball import Kin, ik_best, localize_base, move_to, read_angles, GRIP_OPEN
     from gamepad_utils import graceful_shutdown
     from lerobot.robots.so_follower import SOFollower

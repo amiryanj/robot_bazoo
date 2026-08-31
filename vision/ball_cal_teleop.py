@@ -53,7 +53,7 @@ class CamThread(threading.Thread):
     def run(self):
         import cv2
         import rerun as rr
-        from handeye_calib import Realsense, backproject
+        from realsense import Realsense, backproject
         from ball_yolo import ball_from_box
         cam = Realsense(); det = _aruco()
         try:

@@ -1,4 +1,4 @@
-> **SUPERSEDED (2026-06-14).** The pink-heart marker is gone and `handeye_calib.py` is
+> **SUPERSEDED (2026-06-14).** The pink-heart marker is gone and the tool is
 > retired (kept only for its `Realsense` class). Camera-pose calibration is now
 > reference-anchored in `vision/cam_calib.py` (white-plate plane + desk tag id 13); recover
 > after a camera move with `cam_calib.py recal`. Kept for historical context.
@@ -7,7 +7,7 @@
 
 **Result (2026-06-11):** `T_cam→base` solved at **4.6 mm RMS** over 16 poses →
 `outputs/calib/handeye.json`. Camera sits 471 mm above the base origin, optical axis
-7° off straight-down. Tool: `vision/handeye_calib.py`.
+7° off straight-down. Tool: `vision/handeye_calib.py` (deleted; see `vision/cam_calib.py`).
 
 ## The problem
 

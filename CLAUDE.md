@@ -222,6 +222,9 @@ SmolVLA training+inference; big-VLA (7B) training needs the cloud.
   corner (panel thickness — lateral +7.3%, axial +0.4%, so the 28 mm tag size is right).
 
 **Vision (perception, WIP):**
+- `vision/realsense.py` — **the camera layer**: the top-down D455 (`Realsense`, aligned
+  color+depth+intrinsics per grab) and `backproject` (pixel+depth → 3-D, camera frame).
+  Was `handeye_calib.py`; renamed for what it is once the pink-heart calibration went.
 - `vision/capture_frame.py` — grab one aligned color+depth+intrinsics frame from the
   top-down Realsense → `outputs/vision/<ts>/`. For offline detector dev (no arm).
 - `vision/ball.py` — `fit_table_plane` (RANSAC, **works**, reused) + `localize_ball`
@@ -246,7 +249,8 @@ SmolVLA training+inference; big-VLA (7B) training needs the cloud.
   (single-frame T_cam→base from desk tag + plate after touching the camera; tag averaged
   ~16 frames → 0.3°/2 mm), `check` (self-check guard: table tilt < 2° AND ball sits on the
   plate). Run `check` after anything that touches the camera; `level`/`recal` to fix it.
-  Supersedes the retired pink-heart `handeye_calib.py` (kept only for its `Realsense` class)
+  Supersedes the retired pink-heart hand-eye tool (its camera layer is now
+  `vision/realsense.py`)
   and the gripper-tag `tag_handeye.py` (deleted — clustered poses left a ~10° tilt).
 - `vision/scene_align.py` — **the alignment proof**: headless MuJoCo render overlaying, in
   the base frame, the robot at live joints + the camera's coloured point cloud + the ball +
@@ -340,7 +344,7 @@ override) — edit it (not EEPROM) to change standing gains.
       T_cam→base from the white-plate plane (level + z) + the fixed desk tag (`DICT_4X4_50`
       id 13, x/y + yaw) → `outputs/calib/handeye.json` + `desk_anchor.json`. After any camera
       move: `cam_calib.py recal` (single frame, no arm, 0.3°/2 mm) then `check`. Replaced the
-      pink-heart `handeye_calib.py` (heart gone; file kept only for its `Realsense` class) and
+      pink-heart hand-eye tool (heart gone; its camera layer is now `vision/realsense.py`) and
       the gripper-tag `tag_handeye.py` (deleted — left a ~10° tilt). Verify with `scene_align.py`.
 - [x] **Real-arm tuning done (2026-06-11)** — `calibrate.py` now records the wrist IMU
       per capture; diagnosed the after-stop oscillation (underdamped loop + gravity)

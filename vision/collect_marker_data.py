@@ -68,7 +68,7 @@ def main():
 
     import cv2
     from pick_ball import Kin, move_to, read_angles
-    from handeye_calib import Realsense
+    from realsense import Realsense
     from gamepad_utils import graceful_shutdown
     from lerobot.robots.so_follower import SOFollower
     from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig

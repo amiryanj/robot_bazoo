@@ -3,7 +3,7 @@
 
 Pipeline (critical-path step 3, first iteration):
   ball_yolo (2-D box + depth -> ball centre, cam frame)
-  -> handeye.json (T_cam->base from vision/handeye_calib.py)
+  -> handeye.json (T_cam->base from vision/realsense.py)
   -> MuJoCo numeric IK (same model the calibration validated end-to-end)
   -> slow scripted sequence: above ball -> descend -> close -> lift -> put back -> rest.
 
@@ -364,7 +364,7 @@ def localize_base(detector=None, cam=None):
     from ball_yolo import ball_from_box
     from cloud import crop_z, extract_planes
     from cloud import deproject as cloud_deproject
-    from handeye_calib import Realsense
+    from realsense import Realsense
 
     he = json.load(open(HANDEYE))
     R_cb, t_cb = np.array(he["R"]), np.array(he["t"])
@@ -423,7 +423,7 @@ def watch():
     import cv2
     import rerun as rr
     import rerun.blueprint as rrb
-    from handeye_calib import Realsense
+    from realsense import Realsense
 
     detector = BallDetector()
     print(f"Detector on {detector.device}. Ctrl-C to stop.")
@@ -679,7 +679,7 @@ def main():
     if args.record:
         import cv2
         from datetime import datetime
-        from handeye_calib import Realsense
+        from realsense import Realsense
         rec_dir = ROOT / "outputs/vision" / f"grasp_{datetime.now():%Y-%m-%d_%H-%M-%S}"
         rec_dir.mkdir(parents=True, exist_ok=True)
         rec_cam = Realsense()

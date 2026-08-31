@@ -52,7 +52,7 @@ def light_close(robot, pose, read_angles, MOTOR_NAMES):
 
 def detect_finger_tags(color, depth, K, R_cb, t_cb):
     import cv2
-    from handeye_calib import backproject
+    from realsense import backproject
     par = cv2.aruco.DetectorParameters()
     par.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
     det = cv2.aruco.ArucoDetector(
@@ -71,7 +71,7 @@ def detect_finger_tags(color, depth, K, R_cb, t_cb):
 
 def main():
     import cv2  # noqa
-    from handeye_calib import Realsense
+    from realsense import Realsense
     from ball_yolo import ball_from_box
     from pick_ball import (Kin, BallDetector, localize_base, plan_waypoints, ik_best,
                            read_angles, move_to, GRIP_OPEN, GRASP_DEPTH, LIFT_CLEAR,

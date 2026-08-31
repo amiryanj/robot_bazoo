@@ -484,7 +484,7 @@ def main():
     if args.vision:
         try:
             sys.path.insert(0, str(Path(__file__).resolve().parent / "vision"))
-            from handeye_calib import Realsense
+            from realsense import Realsense
             from pick_ball import BallDetector, Kin, run_grasp, move_to, read_angles
             print("Vision: opening top-down realsense + loading detector...")
             vcam = Realsense()

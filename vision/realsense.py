@@ -1,29 +1,25 @@
 #!/usr/bin/env python
-"""Shared camera + FK/geometry utilities for the vision stack.
+"""The top-down Realsense D455, and pixel+depth -> 3-D.
 
-NOTE: this file used to be the pink-heart hand-eye calibration tool. The heart marker is
-gone and hand-eye calibration now lives in `vision/cam_calib.py` (reference-anchored:
-white-plate plane + desk ArUco tag). What remains here are the generic, still-shared bits
-that many tools import:
-  - `Realsense`   — the top-down D455 wrapper (aligned color+depth+intrinsics per grab),
-  - `backproject` — pixel + aligned depth -> 3-D point in the camera frame,
-  - `make_fk`     — MuJoCo FK of the `gripper` body (base frame).
+  - `Realsense`   — D455 wrapper, aligned color+depth+intrinsics per grab,
+  - `backproject` — pixel + aligned depth -> 3-D point in the camera frame.
 
-(The filename is kept only so the ~20 importers don't churn; it's no longer a calib tool.)
+Was `realsense.py`, the pink-heart hand-eye tool. The heart is gone and hand-eye
+calibration lives in `vision/cam_calib.py` now (reference-anchored: white-plate plane +
+desk ArUco tag). Only the camera layer was left, so the file is named for what it is.
+`make_fk` went with the rename: it was MuJoCo FK of the `gripper` body, and nothing
+called it -- `tag_sweep.py` has its own `make_fk2`, and `pick_ball.Kin` is the FK
+everything else uses.
 """
-import math
 from pathlib import Path
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 SERIAL = "117222251972"
-XML = str(ROOT / "SO-ARM100/Simulation/SO101/scene.xml")
-MARKER_BODY = "gripper"            # FK target: the wrist_roll part the fingers hang off
+XML = str(ROOT / "SO-ARM100/Simulation/SO101/scene.xml")   # tag_sweep imports this
 OUT = ROOT / "outputs/calib"
 WORKSPACE_Z = (0.20, 1.2)          # metres; valid depth band for back-projection
-MOTOR_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex",
-               "wrist_flex", "wrist_roll", "gripper"]
 
 
 def backproject(u, v, depth_m, K, win=4):
@@ -36,24 +32,6 @@ def backproject(u, v, depth_m, K, win=4):
     z = float(np.median(z))
     return np.array([(u - K["ppx"]) * z / K["fx"],
                      (v - K["ppy"]) * z / K["fy"], z])
-
-
-def make_fk():
-    """Return fk(ang_deg) -> (R, t): pose of the `gripper` body (the wrist_roll part) in
-    the base/world frame, from MuJoCo FK of the SO-101 model."""
-    import mujoco
-    mm = mujoco.MjModel.from_xml_path(XML)
-    md = mujoco.MjData(mm)
-    adr = {j: mm.jnt_qposadr[mujoco.mj_name2id(mm, mujoco.mjtObj.mjOBJ_JOINT, j)]
-           for j in MOTOR_NAMES}
-    bid = mujoco.mj_name2id(mm, mujoco.mjtObj.mjOBJ_BODY, MARKER_BODY)
-
-    def fk(ang):
-        for j, a in adr.items():
-            md.qpos[a] = math.radians(ang[j])
-        mujoco.mj_forward(mm, md)
-        return md.xmat[bid].reshape(3, 3).copy(), md.xpos[bid].copy()
-    return fk
 
 
 # ── Realsense (own pipeline: aligned color+depth+intrinsics) ──────────────────────────

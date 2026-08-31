@@ -40,7 +40,7 @@ def main():
     from ball_yolo import ball_from_box
     from cloud import crop_z
     from cloud import deproject as dp
-    from handeye_calib import Realsense
+    from realsense import Realsense
     from pick_ball import BallDetector, JOINT_OFFSETS
 
     he = json.load(open(HANDEYE))
