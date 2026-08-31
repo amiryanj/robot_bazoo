@@ -48,6 +48,7 @@ REF_ID = 13                        # a real tag misdecoded as id 128 at full siz
 REF_SIDE = 0.0274                  # the repo's desk-tag print (cam_calib.DESK_TAG_SIDE_M)
 SAMPLES = ROOT / "outputs/calib/joystick_samples.json"
 MODEL = ROOT / "outputs/calib/joystick_body.json"
+BOX_MODEL = ROOT / "outputs/calib/box_body.json"   # the 3-face box (box_tags.py)
 
 
 def unit_corners(side):
@@ -317,6 +318,84 @@ def body_pose(dets, K, model, guess=None):
     R, t = cv2.Rodrigues(rv)[0], tv.ravel()
     err = float(np.sqrt(np.mean(np.sum((project(K, R, t, obj) - img) ** 2, axis=1))))
     return R, t, err
+
+
+class VirtualCam:
+    """A fake camera that RENDERS a tag body moving in front of it.
+
+    Lets the whole teleop loop -- detector, body pose, fusion, IK, sim robot -- run with
+    no webcam and no hand. Frames go through the REAL detector, so this exercises the
+    actual code path rather than injecting poses behind it.
+
+    The motion is a slow weave plus a slow tumble: enough to move the arm and to swap
+    which faces are visible, which is what makes tag handoff and dropouts happen."""
+
+    def __init__(self, model_path=None, size=(1280, 720), fov=70.0, dict_name=DICT,
+                 seed=0, noise_px=0.3):
+        model_path = model_path or (BOX_MODEL if BOX_MODEL.exists() else MODEL)
+        import cv2
+        from tag_pose import K_from_fov
+        self.model = load_model(model_path)
+        self.K = K_from_fov(size[0], size[1], fov)
+        self.size = size
+        self.noise_px = noise_px    # corner noise, px — a noise-free render would make
+                                    # every pose exact and hide fusion problems
+        self.rng = np.random.default_rng(seed)
+        dic = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, dict_name))
+        self.imgs = {}
+        for tid in self.model["tags"]:
+            m = cv2.aruco.generateImageMarker(dic, int(tid), 240)
+            q = 240 // (dic.markerSize + 2)                 # 1-module quiet zone
+            card = np.full((240 + 2 * q, 240 + 2 * q), 255, np.uint8)
+            card[q:q + 240, q:q + 240] = m
+            self.imgs[tid] = (card, q)
+        self.t0 = time.perf_counter()
+
+    def pose(self, t):
+        """Body pose in the camera frame at time t — position (m) and rotation."""
+        import cv2
+        p = np.array([0.06 * math.sin(2 * math.pi * 0.25 * t),
+                      0.04 * math.sin(2 * math.pi * 0.17 * t + 1.0),
+                      0.32 + 0.05 * math.sin(2 * math.pi * 0.13 * t + 2.0)])
+        # Base orientation holds a CORNER toward the camera, so two or three faces stay
+        # visible -- 90% of frames carry 2+ tags here, matching the real box (75.5%).
+        # Facing one flat face at the camera instead gives 50%, which would make the
+        # test easier than reality in exactly the way that hides dropout bugs.
+        rv = np.array([3.54, -1.20, 0.0]) + np.array([
+            0.5 * math.sin(2 * math.pi * 0.07 * t),
+            0.6 * math.sin(2 * math.pi * 0.05 * t + 0.7),
+            0.8 * math.sin(2 * math.pi * 0.06 * t + 1.9)])
+        return cv2.Rodrigues(rv)[0], p
+
+    def grab(self, timeout=0.5):
+        import cv2
+        t = time.perf_counter() - self.t0
+        R, p = self.pose(t)
+        w, h = self.size
+        frame = np.full((h, w), 235, np.uint8)
+        for tid, (Rm, tm, side) in self.model["tags"].items():
+            objb = unit_corners(side) @ Rm.T + tm
+            pc = objb @ R.T + p
+            # a face pointing away from the camera must not be drawn
+            nrm = R @ Rm @ np.array([0.0, 0.0, 1.0])
+            if nrm @ (pc.mean(0) / np.linalg.norm(pc.mean(0))) > -0.34:
+                continue
+            px = project(self.K, R, p, objb)
+            if self.noise_px:
+                px = px + self.rng.normal(0, self.noise_px, px.shape)
+            card, q = self.imgs[tid]
+            n = card.shape[0] - 2 * q
+            src = np.float32([[q, q], [q + n, q], [q + n, q + n], [q, q + n]])
+            H = cv2.getPerspectiveTransform(src, px.astype(np.float32))
+            warp = cv2.warpPerspective(card, H, (w, h), borderValue=255,
+                                       flags=cv2.INTER_LINEAR)
+            mask = cv2.warpPerspective(np.full(card.shape, 255, np.uint8), H, (w, h),
+                                       borderValue=0)
+            frame[mask > 128] = warp[mask > 128]
+        return cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR), self.K
+
+    def stop(self):
+        pass
 
 
 # ── live view ─────────────────────────────────────────────────────────────────────────

@@ -624,6 +624,132 @@ class ViewCam:
             pass
 
 
+# ── fusion selftest (no camera, no hand, no arm) ───────────────────────────────────
+
+class _FakeIMU:
+    """Stands in for PadIMU: same `latest()` contract, values we control."""
+
+    def __init__(self):
+        self.w = np.zeros(3)
+        self.a = np.zeros(3)
+
+    def latest(self):
+        return 0.0, self.w.copy(), self.a.copy()
+
+
+def selftest(seed=0, verbose=True, calib_deg=1.4):
+    """Drive InertialAid with a KNOWN hand motion and check what comes out.
+
+    The fusion was written and tuned when only 0.4% of frames carried 2+ tags and the
+    gyro read 12% high, so it has never been exercised on good input. This runs the real
+    filter -- not a copy of it -- against a trajectory whose truth we know, with the
+    error sources that actually exist: corner noise on the tag pose, tag dropouts, a
+    tilted extrinsic leaking gravity into the accelerometer, and gyro bias.
+
+    Checks three things, because they fail differently:
+      1. tracking error while vision is present (should be at the noise floor),
+      2. tracking error through a BLIND gap (this is what the IMU is for),
+      3. whether the filter's own sigma is HONEST -- an overconfident filter is worse
+         than a noisy one, since the caller trusts sigma to decide when to stop."""
+    import cv2
+    rng = np.random.default_rng(seed)
+
+    HZ, T = 30.0, 40.0
+    dt = 1.0 / HZ
+    g_cam = np.array([0.0, 9.80665, 0.0])          # camera y-down: rest reading is +y
+    X = cv2.Rodrigues(np.array([0.3, -0.8, 1.9]))[0]        # some IMU->body rotation
+    # 1.4 deg: the alignment we actually measure now (pad_imu align, 2026-08-31, four
+    # runs agreeing to 1.34 deg; live camera-vs-gyro gap 1.37 deg with 2+ tags).
+    tilt = cv2.Rodrigues(rng.normal(0, np.radians(calib_deg), 3))[0]
+    acc_bias = rng.normal(0, 0.05, 3)
+    gyro_bias = rng.normal(0, np.radians(0.3), 3)
+
+    def truth(t):
+        """Hand position and orientation at time t: a smooth ~1 Hz weave."""
+        p = np.array([0.06 * math.sin(2 * math.pi * 0.45 * t),
+                      0.04 * math.sin(2 * math.pi * 0.31 * t + 1.0),
+                      0.30 + 0.05 * math.sin(2 * math.pi * 0.23 * t + 2.0)])
+        a = np.array([-0.06 * (2 * math.pi * 0.45) ** 2 * math.sin(2 * math.pi * 0.45 * t),
+                      -0.04 * (2 * math.pi * 0.31) ** 2 * math.sin(2 * math.pi * 0.31 * t + 1.0),
+                      -0.05 * (2 * math.pi * 0.23) ** 2 * math.sin(2 * math.pi * 0.23 * t + 2.0)])
+        w = np.array([0.6 * math.sin(2 * math.pi * 0.17 * t),
+                      0.5 * math.sin(2 * math.pi * 0.13 * t + 0.7),
+                      0.4 * math.sin(2 * math.pi * 0.21 * t + 1.9)])
+        return p, a, w
+
+    # blind gaps: the box gives 2+ tags ~75% of the time, so gaps are short but real
+    blind = np.zeros(int(T * HZ), bool)
+    k = 0
+    while k < len(blind):
+        k += int(rng.uniform(1.0, 4.0) * HZ)
+        n = int(rng.uniform(0.15, 0.60) * HZ)
+        blind[k:k + n] = True
+        k += n
+
+    imu = _FakeIMU()
+    aid = InertialAid(imu, X)
+    R = cv2.Rodrigues(np.array([math.pi, 0.1, 0.0]))[0]
+    rows = []
+    for i in range(len(blind)):
+        t = i * dt
+        p_t, a_t, w_t = truth(t)
+        R = R @ cv2.Rodrigues(w_t * dt)[0]
+
+        # what the IMU would report: specific force in the body frame, then to IMU axes
+        a_body = R.T @ (a_t + g_cam)
+        imu.a = X.T @ (tilt @ a_body) + acc_bias + rng.normal(0, 0.02, 3)
+        imu.w = X.T @ (R.T @ (R @ w_t)) + gyro_bias + rng.normal(0, np.radians(0.1), 3)
+
+        if blind[i]:
+            hand_R = hand_p = None
+        else:
+            hand_R = R @ cv2.Rodrigues(rng.normal(0, np.radians(1.4), 3))[0]
+            hand_p = p_t + rng.normal(0, 0.002, 3)
+        fused, _ = aid.update(dt, hand_R, hand_p)
+        if fused is not None and t > 3.0:          # let the filter settle
+            rows.append((t, float(blind[i]), float(np.linalg.norm(fused - p_t)),
+                         aid.kf.sigma_p, aid.blind))
+
+    rows = np.array(rows)
+    err_seen = float(np.median(rows[rows[:, 1] == 0][:, 2])) * 1e3
+    # honesty: how often does the true error exceed the filter's own 3-sigma?
+    over = float(np.mean(rows[:, 2] > 3 * rows[:, 3]))
+    # Error through a gap is dominated by the gravity that leaks in through the
+    # extrinsic error: a tilt of d degrees leaks sin(d)*9.81 m/s^2, which integrates as
+    # 0.5*a*t^2. So the useful number is not one figure but error vs GAP LENGTH -- it
+    # says how long the IMU may be trusted before the arm should stop following.
+    buckets = [(0.0, 0.15), (0.15, 0.3), (0.3, 0.5), (0.5, 1.0)]
+    per_gap = []
+    for lo, hi in buckets:
+        m = (rows[:, 4] > lo) & (rows[:, 4] <= hi)
+        if m.sum() > 5:
+            per_gap.append((lo, hi, float(np.percentile(rows[m, 2], 90)) * 1e3,
+                            float(np.median(rows[m, 3])) * 1e3, int(m.sum())))
+    if verbose:
+        print(f"  {len(rows)} ticks, {100*np.mean(rows[:,1]):.0f}% blind, "
+              f"extrinsic error {calib_deg:.1f} deg")
+        print(f"  with vision:  median error {err_seen:5.2f} mm")
+        print(f"  blind for     p90 error   filter sigma   n")
+        for lo, hi, e, sg, n in per_gap:
+            print(f"   {lo:4.2f}-{hi:4.2f}s  {e:8.1f} mm  {sg:8.1f} mm  {n:5d}")
+        print(f"  filter honesty: error > 3 sigma on {100*over:.1f}% of ticks (want < 1%)")
+    # What to assert. The gap error is PHYSICS, not a bug: a tilt of d degrees leaks
+    # sin(d)*9.81 m/s^2 into the acceleration and that integrates as 0.5*a*t^2, so at
+    # 1.4 deg the error must quadruple when the gap doubles, and it does (8 -> 27 -> 77
+    # mm). Pinning a number on the long buckets would only be pinning that formula. What
+    # MUST hold is (a) vision-present accuracy, and (b) that the filter's own sigma stays
+    # close to the true error -- the caller stops following when sigma grows, so an
+    # optimistic sigma is the failure that actually hurts.
+    assert err_seen < 8.0, f"tracking error with vision is {err_seen:.1f} mm"
+    for lo, hi, e, sg, _ in per_gap:
+        assert sg > 0.4 * e, (f"filter is optimistic in the {lo:.2f}-{hi:.2f}s bucket: "
+                              f"says {sg:.0f} mm, really {e:.0f} mm")
+    assert over < 0.01, f"filter is overconfident: {100*over:.1f}% beyond 3 sigma"
+    short = [e for lo, hi, e, _, _ in per_gap if hi <= 0.15]
+    assert not short or max(short) < 15.0, f"short-gap error is {max(short):.1f} mm"
+    return err_seen, per_gap, over
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -656,7 +782,19 @@ def main():
                     help="size of the Rerun picture (1.0 = full; detection uses full)")
     ap.add_argument("--no-log", action="store_true", help="skip the episode CSV")
     ap.add_argument("--dry-run", action="store_true", help="no robot; verify the mapping")
+    ap.add_argument("--model", default=str(ROOT / "outputs/calib/box_body.json"),
+                    help="tag body model (default: the 3-face box)")
+    ap.add_argument("--selftest", action="store_true",
+                    help="check the fusion against a known trajectory; no hardware")
     args = ap.parse_args()
+
+    if args.selftest:
+        print("fusion selftest (synthetic hand, no camera / IMU / arm):")
+        for seed in range(3):
+            print(f"  --- seed {seed}")
+            selftest(seed)
+        print("\nselftest: PASS")
+        return 0
 
     import cv2
     import pygame
@@ -669,7 +807,7 @@ def main():
     from pick_ball import Kin, MOTOR_NAMES, read_angles, move_to
 
     M = parse_axes(args.axes)
-    model = load_model()
+    model = load_model(args.model)
     keep = set(model["tags"])
     det = make_detector("DICT_4X4_50")
     src = open_source(args.source, args.fov)

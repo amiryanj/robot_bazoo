@@ -171,7 +171,13 @@ class RS:
 
 
 def open_source(spec, fov):
-    return RS() if spec == "realsense" else Webcam(spec, fov=fov)
+    """'realsense', 'virtual' (a rendered tag body — no hardware), or a V4L2 index."""
+    if spec == "realsense":
+        return RS()
+    if spec == "virtual":
+        from tag_body import VirtualCam          # lazy: tag_body imports this module
+        return VirtualCam(fov=fov)
+    return Webcam(spec, fov=fov)
 
 
 # ── printable tags ────────────────────────────────────────────────────────────────────
