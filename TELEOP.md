@@ -1,8 +1,14 @@
 # Tag teleop: driving the SO-101 with a tagged joystick
 
-**Goal.** Move the arm by moving your hand. A plain USB webcam watches AprilTags stuck on
-a hand-held Nintendo Switch Pro Controller; the controller's 6-D pose drives the TCP
-position + wrist roll, and the gamepad's own buttons carry the clutch and the gripper.
+**Goal.** Move the arm by moving your hand. A plain USB webcam watches a **3-face tag box**
+(a 32 mm half-cube, one `DICT_4X4_50` tag per face, ids 7/11/15, 28 mm squares) carried on a
+hand-held Nintendo Switch Pro Controller; the box's 6-D pose drives the TCP position + wrist
+roll, and the gamepad's own buttons carry the clutch and the gripper.
+
+Why a box and not flat tags: a single planar tag has **two** valid PnP solutions (the planar
+two-fold ambiguity), and the tracker can sit on the mirrored one for a whole stretch --
+self-consistent, and wrong. Two visible faces are not coplanar, so the pose is unique. The
+box shows 2+ faces in **75.5%** of frames; the two loose tags it replaced managed 0.4%.
 
 This exists because there is no leader arm and stick teleop is too clumsy for
 pick-and-place (see CLAUDE.md, "Data strategy"). It is a **demo-collection input device**,
@@ -14,7 +20,10 @@ not the end goal.
 teleop_tag.py        the loop: clutch, mapping, safety rails, IK, Rerun, CSV
   ├─ pad_imu.py      the controller's OWN 6-axis IMU  (evdev) + its extrinsic calibration
   ├─ vision/tag_body.py   rigid multi-tag body model -> one body pose from any visible tag
+  │    │                  (also VirtualCam: renders a tag body, so the loop runs with
+  │    │                   no camera and no hand -- `--source virtual`)
   │    └─ vision/tag_pose.py   camera + ArUco detector + single-tag PnP  (the base layer)
+  ├─ vision/box_tags.py   builds the box model: ident -> capture -> fit -> show
   ├─ pick_ball.py    Kin (MuJoCo FK/IK), Twin, read_angles, move_to, MOTOR_NAMES
   ├─ gamepad_utils.py  button_index, filtered_axis_value, graceful_shutdown, REST_POSE
   ├─ station.py      JoystickManager (hot-plug)
@@ -75,6 +84,14 @@ from the tags / gyro propagation), so the remaining model is exactly the double 
 constant bias *integrates* into position while white noise averages out, and without it the
 filter was 16 mm wrong while reporting 2.9 mm confidence.
 
+**The gyro was reading 12% high.** Before any of this could work, `hid_nintendo`'s reported
+scale of 14247 units/deg/s turned out to be wrong -- it should be ~16250. Found twice,
+independently: vision (tag rotation vs gyro, ratio 0.876) and gravity alone (still-to-still
+accelerometer transitions, no camera, 0.875). `pad_imu.py gyrocal` measures scale and bias
+together against gravity, in 60 s, with no camera. They must be solved jointly: fitting
+either alone absorbs part of the other (scale alone left 10.8 deg of residual, both left
+1.7 deg). Uncorrected, this alone moved `X` by tens of degrees.
+
 `pad_imu.py` calibrates the one fixed rotation `X` (`v_body = X @ v_imu`):
 - `align` — from a hand-waving recording, pairing **rotation increments** over 0.35 s
   (not finite-differenced angular velocity, which amplifies 20 Hz pose noise ~25×).
@@ -82,9 +99,39 @@ filter was 16 mm wrong while reporting 2.9 mm confidence.
   with bootstrap uncertainty and a **coverage** score (gravity in one orientation pins
   only 2 of 3 DoF, so coverage must be reported, not assumed).
 
-State 2026-08-21: **X uncertain to 2.19°** from 35 accumulated poses; per-pose scatter
-4.06° is irreducible AprilTag noise. Successive solves disagree by 1.7° — below the noise
-floor, i.e. converged. `check` appends across sessions, so more poses tighten it.
+`align` also refuses a bias measured while the pad is moving (it checks the stillness sd),
+and shows **live axis coverage** while recording: `X` is only observable in the directions
+you actually rotate about, and the pose count cannot show you that. The three characters
+are the eigenvalues of `sum(w_hat w_hat^T)` -- `[#..]` means one axis only (underdetermined),
+`[###]` means well spread.
+
+State 2026-08-31, after the box and the gyro fix:
+
+| | before | after |
+|---|---|---|
+| run-to-run agreement of `X` | 43° | **1.34° avg, 1.81° worst** (4 runs) |
+| live camera-vs-gyro gap, 2+ tags | — | **1.37°** |
+| gravity residual | 14.9° | **1.5°** |
+
+### How far the IMU can be trusted
+
+`teleop_tag.py --selftest` drives the real filter with a known hand path and realistic
+errors -- 1.4° extrinsic, accel bias, gyro bias, corner noise, dropouts -- and reports error
+against **gap length**, because a single number hides the shape:
+
+| blind for | p90 error | filter's own sigma |
+|---|---|---|
+| with vision | 2.3 mm (median) | — |
+| 0.00–0.15 s | 8.2 mm | 9.1 mm |
+| 0.15–0.30 s | 27.3 mm | 26.6 mm |
+| 0.30–0.50 s | 77.2 mm | 53.1 mm |
+
+The growth is physics, not a bug: a `d`-degree tilt leaks `sin(d)*9.81` m/s² into the
+measured acceleration, and that integrates as `½at²` -- so the error must roughly quadruple
+when the gap doubles, and it does. **Practical limit: trust the IMU for ~0.15 s of
+blindness, marginally to 0.3 s, not beyond.** The filter's sigma tracks the true error
+closely, so `bridge_mm` is a sound stopping rule -- and the selftest asserts that honesty
+rather than asserting a number, since an optimistic sigma is the failure that hurts.
 
 ## Measured performance (2026-08-21, `--sim`)
 
@@ -127,7 +174,8 @@ and 4.4× faster on the pinned pose (188.5 → 43.0 ms).
 drives the TCP inward and upward the arm folds, and holding that pitch forces wrist_flex to
 saturate. A teleop-appropriate orientation preference is the open fix.
 
-**5. The drift you feel is a ratchet, and it is caused by tag blindness — not by the code.**
+**5. The drift you feel is a ratchet, caused by tag blindness — not by the code.**
+*(Fixed 2026-08-31 by the tag box; kept because the measurement is how it was found.)*
 Measured over one 95 s session:
 
 | hand motion | net displacement | path |
@@ -140,20 +188,23 @@ The outward and return strokes cancel almost exactly, but **half the hand motion
 28 blind gaps, mean 0.80 s, max 5.5 s, **68% longer than the 0.4 s timeout**. The operator
 never sees it happen mid-stroke.
 
-Root cause: **`tags == 2` has occurred in 0% of every run logged** — the second tag has
-never once been seen, so exactly one hand orientation is trackable. This is a tag-placement
-problem, not a timing one. Immediate remedy: press **A** to ease back to the ready pose.
+Root cause: **`tags == 2` occurred in 0% of every run logged** — the second tag was never
+once seen, so exactly one hand orientation was trackable. A tag-placement problem, not a
+timing one. **Fixed** by the 3-face box: 2+ tags now appear in 75.5% of frames. If a gap
+still catches you mid-stroke, press **A** to ease back to the ready pose.
 
 ## Known issues / next
 
-- [ ] **Tag coverage** — tags on more faces of the controller. This is the top blocker.
-- [ ] `ms_detect` 28.8 ms — detect at half resolution, refine at full.
-- [ ] Teleop-appropriate `approach_dir` so `wrist_flex` stops saturating.
-- [ ] **Tag id collision:** the desk anchor tag (`vision/cam_calib.py`, `DICT_4X4_50` id 13)
-      and the joystick reference tag (`outputs/calib/joystick_body.json`, `DICT_4X4_50`
-      id 13, same 27.4 mm) are **the same dictionary, id and size**. Harmless in normal use
-      (different cameras), but `cam_calib.py recal` will mis-anchor if the controller is
-      lying in the Realsense's view. Renumber the joystick tags when they are reprinted.
+- [x] ~~**Tag coverage** — the top blocker.~~ Fixed by the 3-face box: 0.4% → 75.5%.
+- [x] ~~**Tag id collision**~~ — the box uses ids 7/11/15, clear of the finger tags (1, 2)
+      and the desk anchor (13).
+- [ ] **Not yet re-tested on the real arm since the box.** Everything above is measured,
+      but the last real-arm run predates the new marker and the gyro fix. Do a `--sim` run
+      with the clutch first.
+- [ ] Teleop-appropriate `approach_dir` so `wrist_flex` stops saturating (finding 4).
+- [ ] `ms_detect` 28.8 ms — detect at half resolution, refine at full. Note the camera
+      itself costs 33 ms/frame at 30 fps, so this is not the whole story: measured
+      grab 33.4 ms, detect 11.0 ms, jpeg-for-Rerun 4.5 ms at 1280×720.
 - [ ] Rerun retains the whole recording by design (~700 B per scalar point × ~36 series).
       Not a leak in our code or MuJoCo — verified RSS-flat with logging off.
 
@@ -161,11 +212,30 @@ problem, not a timing one. Immediate remedy: press **A** to ease back to the rea
 
 ```bash
 conda activate lerobot
-# sim (no hardware):
+# no hardware at all -- rendered tag box, MuJoCo arm:
+python teleop_tag.py --sim --source virtual
+# real webcam + box, MuJoCo arm:
 python teleop_tag.py --sim --gain 1.0 --max-speed 0.20
 # real arm:
 python teleop_tag.py --gain 1.0 --max-speed 0.20
+# check the fusion maths, no camera / IMU / arm:
+python teleop_tag.py --selftest
 ```
+
+**Setting up the box from scratch** (only needed once, or after re-printing tags):
+
+```bash
+python vision/box_tags.py ident   --source 9   # which tag ids are on it?
+python vision/box_tags.py capture --source 9   # 45 s, roll it through the edges
+python vision/box_tags.py fit                  # -> outputs/calib/box_body.json
+python vision/box_tags.py show                 # eyeball the model in 3-D
+sg input -c "python pad_imu.py gyrocal"        # gyro scale + bias (no camera)
+sg input -c "python pad_imu.py align --source 9 --seconds 60"   # IMU -> box rotation
+sg input -c "python pad_imu.py view --source 9 --reanchor 1"    # check: ~1.4 deg
+```
+
+`box_tags.py window` shows the detection in a plain window if you need to aim the camera
+(the OpenCV here is the headless build, so there is no `cv2.imshow`; it uses pygame).
 
 The IMU needs the `input` group: prefix with `sg input -c "..."` (or
 `sudo usermod -aG input $USER` once, then re-login).
