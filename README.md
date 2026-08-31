@@ -53,7 +53,7 @@ flowchart TD
         station["station.py<br/>teleop cockpit"]
         calibrate["calibrate.py<br/>step / chirp / profile / autotune"]
         simc["sim_collect.py<br/>record sim episodes"]
-        he["vision/handeye_calib.py<br/>T_cam-to-base solver"]
+        he["vision/cam_calib.py<br/>T_cam-to-base solver"]
         pb["pick_ball.py (WIP)<br/>scripted pick-and-place"]
     end
 
@@ -120,7 +120,7 @@ Everything written down in this repo, from here:
 | `servo_tuning.py` | Tuning toolbox: PID r/w, trajectories, step/FRF analysis |
 | `calibrate.py` | `step` / `chirp` / `profile` / `autotune` CLI for the servos |
 | `vision/scene_debug.py` | **The 3-D truth window**: camera panel + point cloud + MuJoCo twin; live measured-vs-predicted marker error |
-| `vision/handeye_calib.py` | Hand-eye calibration tool (gamepad + capture + solver) |
+| `vision/realsense.py` | The top-down D455 (aligned color+depth+K) + `backproject` |
 | `vision/autolabel.py`, `vision/detector_bench.py`, `vision/bench_localize.py` | Detector auto-labeling / detector benchmark / 3-D localization benchmark |
 | `vision/collect_marker_data.py` | Bounded autonomous arm session for marker training data |
 | `ESP32/` | ESP32-C3 + ADXL345 IMU firmware and host-side readers |
@@ -151,7 +151,7 @@ Live worklist; longer status/history lives in [CLAUDE.md](CLAUDE.md).
       box @0.36 conf where color was brittle (wood reads orange). Zero-shot COCO
       (`orange`@0.09) and YOLO-World (@0.18) were too weak. Fine-tune on our scene
       later if conf wobbles at table edges / under occlusion (model = ready auto-labeler).
-- [x] **Hand-eye calibration done** (`vision/handeye_calib.py`): **4.6 mm RMS over
+- [x] **Hand-eye calibration done** (now `vision/cam_calib.py`): **4.6 mm RMS over
       16 poses** → `outputs/calib/handeye.json`. Marker = the **pink heart sticker** on a
       gripper finger, detected with **Grounding DINO** ("heart" zero-shot) + an in-box
       pink gate (hue wraps: gate both HSV ends, cap saturation to reject the red arm).

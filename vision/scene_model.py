@@ -172,7 +172,7 @@ def summarize(model):
 def main():
     import argparse
     import torch
-    from handeye_calib import Realsense
+    from realsense import Realsense
     from pick_ball import BallDetector
 
     ap = argparse.ArgumentParser()

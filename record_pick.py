@@ -140,7 +140,7 @@ def main():
     use_wrist = not args.no_wrist
 
     # ── Cameras (we own them; the robot is connected with cameras={}) ──────────────
-    from handeye_calib import Realsense
+    from realsense import Realsense
     cam = Realsense()
     wrist = None
     if use_wrist:

@@ -194,7 +194,7 @@ def report(R, t):
     from ball_yolo import ball_from_box
     from cloud import crop_z
     from cloud import deproject as dp
-    from handeye_calib import Realsense
+    from realsense import Realsense
     from pick_ball import BallDetector
 
     cam = Realsense()
@@ -224,7 +224,7 @@ def report(R, t):
 def pin_anchor(R, t):
     """Pin the desk tag's pose in the BASE frame from the current hand-eye. The tag is a
     FIXED reference; once pinned, a single frame recovers T_cam->base via `recal`."""
-    from handeye_calib import Realsense
+    from realsense import Realsense
     cam = Realsense(color_res=(1280, 720))            # high-res for sharp tag corners
     try:
         warm_grab(cam)
@@ -247,7 +247,7 @@ def pin_anchor(R, t):
 def recal_from_refs():
     """Single-frame T_cam->base from the fixed references: plate plane (up + z) and the
     desk tag (x/y + yaw). No arm motion. Requires a pinned anchor."""
-    from handeye_calib import Realsense
+    from realsense import Realsense
     if not ANCHOR.exists():
         raise RuntimeError(f"no anchor yet — run `cam_calib.py anchor` once first")
     a = json.load(open(ANCHOR))
@@ -273,7 +273,7 @@ def main():
     from ball import WORKSPACE_Z
     from cloud import crop_z
     from cloud import deproject as dp
-    from handeye_calib import Realsense
+    from realsense import Realsense
 
     if args.cmd == "level":
         R, t, base_doc = load_he()

@@ -26,7 +26,7 @@ def main():
     from ball import WORKSPACE_Z
     from cloud import crop_z
     from cloud import deproject as cloud_deproject
-    from handeye_calib import Realsense
+    from realsense import Realsense
     from pick_ball import BallDetector, HANDEYE
 
     he = json.load(open(HANDEYE))

@@ -159,7 +159,7 @@ class RS:
     """The D455 (colour only here) — reports true intrinsics per grab."""
 
     def __init__(self, size=(1280, 720)):
-        from handeye_calib import Realsense
+        from realsense import Realsense
         self.cam = Realsense(color_res=size)
 
     def grab(self):

@@ -360,7 +360,7 @@ class ImuReader:
 
 def collect(port):
     import cv2
-    from handeye_calib import Realsense
+    from realsense import Realsense
     from pick_ball import move_to, read_angles
     from gamepad_utils import graceful_shutdown
     from lerobot.robots.so_follower import SOFollower

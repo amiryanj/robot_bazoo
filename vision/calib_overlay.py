@@ -22,7 +22,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "vision"))
-from handeye_calib import Realsense, backproject
+from realsense import Realsense, backproject
 
 ZP = -0.030                     # plate height in base frame (m), ~ -29mm
 # park swung to the +y side (pan=-60): TCP ~(0.21, 0.31, 0.14), ~350mm off the desk tag

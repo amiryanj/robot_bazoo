@@ -31,7 +31,7 @@ So: the standard distillation pattern. GDINO auto-labels our own frames; a `yolo
    diversity for free in a static scene).
 2. **Auto-label**: `python vision/autolabel.py <frames_dir> <out_dir>` — GDINO
    "basketball." (conf ≥0.35, whole-table boxes rejected) → class `ball`; the gated
-   pink-heart pipeline from `handeye_calib.py` → class `heart_pink`. Writes YOLO-format
+   pink-heart pipeline (retired) → class `heart_pink`. Writes YOLO-format
    `labels/` + an `overlays/` folder for **human spot-checking — always look** (the
    exposure sweep produced false hearts on a red cable clamp; caught because the static
    scene allows a consensus check across frames, and at the rest pose the heart isn't

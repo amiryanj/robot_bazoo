@@ -81,7 +81,7 @@ def make_fk2():
     jaw (jaw qpos = radians(a*gripper_reading + B0)), plus lowest_z(ang): the
     lowest finger-geom AABB corner over both gripper extremes (collision check)."""
     import mujoco
-    from handeye_calib import XML
+    from realsense import XML
     mm = mujoco.MjModel.from_xml_path(XML)
     md = mujoco.MjData(mm)
     adr = {j: mm.jnt_qposadr[mm.joint(j).id] for j in MOTOR_NAMES}
@@ -169,7 +169,7 @@ def main():
 
     import cv2
     import rerun as rr
-    from handeye_calib import Realsense
+    from realsense import Realsense
     from pick_ball import move_to, read_angles
     from gamepad_utils import graceful_shutdown
     from lerobot.robots.so_follower import SOFollower

@@ -52,7 +52,7 @@ def main():
     from ball_yolo import BALL_RADIUS_M, ball_from_box
     from cloud import crop_z, fit_sphere_known_r
     from cloud import deproject as cloud_deproject
-    from handeye_calib import Realsense
+    from realsense import Realsense
     from pick_ball import BallDetector
 
     he = json.load(open(HANDEYE))
