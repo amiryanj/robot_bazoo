@@ -42,6 +42,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vision"))
 sys.path.insert(0, str(ROOT / "ESP32"))
 
+from config import ARM_PORT   # noqa: E402
+
 HANDEYE = ROOT / "outputs/calib/handeye.json"
 TAG_CALIB = ROOT / "outputs/calib/tag_calib.json"
 SAMPLES = ROOT / "outputs/calib/offset_calib_samples.json"
@@ -426,7 +428,7 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--collect", action="store_true")
     ap.add_argument("--imu", action="store_true", help="use IMU factors in the solve")
-    ap.add_argument("--port", default="/dev/ttyACM1")
+    ap.add_argument("--port", default=ARM_PORT)
     args = ap.parse_args()
 
     if args.selftest:

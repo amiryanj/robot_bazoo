@@ -58,6 +58,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+from config import ARM_PORT
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -755,7 +756,7 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--source", default=CAM_SOURCE)
     ap.add_argument("--fov", type=float, default=70.0)
-    ap.add_argument("--port", default="/dev/ttyACM1")
+    ap.add_argument("--port", default=ARM_PORT)
     ap.add_argument("--gain", type=float, default=GAIN)
     ap.add_argument("--max-speed", type=float, default=MAX_TCP_SPEED,
                     help="m/s ceiling on the commanded TCP (lower = safer, laggier)")

@@ -49,10 +49,11 @@ from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
 
 import servo_tuning as st
 from gamepad_utils import JOINT_LIMITS, graceful_shutdown
+from config import ARM_PORT, TUNING
 
-PORT = "/dev/ttyACM1"   # CH343 arm controller (the ESP32-C3 IMU owns ttyACM0)
+PORT = ARM_PORT
 ROBOT_ID = "so101"
-OUT_ROOT = Path("/home/javad/workspace/lerobot_all/outputs/tuning")
+OUT_ROOT = TUNING
 
 
 # ── Setup helpers ────────────────────────────────────────────────────────────

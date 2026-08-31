@@ -21,6 +21,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vision"))
 
+from config import ARM_PORT   # noqa: E402
+
 HANDEYE = ROOT / "outputs/calib/handeye.json"
 XML = str(ROOT / "SO-ARM100/Simulation/SO101/scene.xml")
 OUT = ROOT / "outputs/calib"
@@ -30,7 +32,7 @@ MOTOR_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex",
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", default="/dev/ttyACM1")
+    ap.add_argument("--port", default=ARM_PORT)
     ap.add_argument("--no-arm", action="store_true")
     args = ap.parse_args()
 

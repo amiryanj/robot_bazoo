@@ -11,12 +11,16 @@ desk ArUco tag). Only the camera layer was left, so the file is named for what i
 called it -- `tag_sweep.py` has its own `make_fk2`, and `pick_ball.Kin` is the FK
 everything else uses.
 """
+import sys
 from pathlib import Path
 
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent.parent
-SERIAL = "117222251972"
+sys.path.insert(0, str(ROOT))
+from config import RS_SERIAL   # noqa: E402
+
+SERIAL = RS_SERIAL
 XML = str(ROOT / "SO-ARM100/Simulation/SO101/scene.xml")   # tag_sweep imports this
 OUT = ROOT / "outputs/calib"
 WORKSPACE_Z = (0.20, 1.2)          # metres; valid depth band for back-projection

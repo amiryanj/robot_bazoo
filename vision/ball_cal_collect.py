@@ -23,6 +23,8 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT)); sys.path.insert(0, str(ROOT / "vision"))
 
+from config import ARM_PORT, ROBOT_ID   # noqa: E402
+
 HANDEYE = ROOT / "outputs/calib/handeye.json"
 GRASP_SQUEEZE = 2.0          # deg past contact (user: 1-3deg, friction holds the ball)
 # record grid: pan/lift/elbow deltas around the grasp pose (orientation kept ~constant so
@@ -104,7 +106,7 @@ def main():
             rec.append(ang)
     print(f"{len(rec)} FK-checked record poses")
 
-    robot = SOFollower(SOFollowerRobotConfig(port="/dev/ttyACM1", id="so101", cameras={}))
+    robot = SOFollower(SOFollowerRobotConfig(port=ARM_PORT, id=ROBOT_ID, cameras={}))
     robot.connect()
     cam = Realsense()
     records = []

@@ -21,8 +21,11 @@ import cv2
 import numpy as np
 import pyrealsense2 as rs
 
-SERIAL = "117222251972"
-OUT = Path("/home/javad/workspace/lerobot_all/outputs/vision")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config import RS_SERIAL, OUT as OUT_ROOT   # noqa: E402
+
+SERIAL = RS_SERIAL
+OUT = OUT_ROOT / "vision"        # was an absolute /home/javad/... path
 
 
 def main():

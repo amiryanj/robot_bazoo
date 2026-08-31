@@ -26,6 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vision"))
 
+from config import ARM_PORT   # noqa: E402
+
 CLEAR = 0.040                       # hover height above ball TOP (m)
 STEP = 0.020                        # commanded delta per axis (m)
 MOTOR_NAMES = ["shoulder_pan", "shoulder_lift", "elbow_flex",
@@ -47,7 +49,7 @@ def gripper_cloud_stats(depth, K, R_cb, t_cb, p_tcp, z_floor):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", default="/dev/ttyACM1")
+    ap.add_argument("--port", default=ARM_PORT)
     args = ap.parse_args()
 
     from realsense import Realsense

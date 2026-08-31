@@ -52,6 +52,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "vision"))
 
+from config import ARM_PORT   # noqa: E402
+
 # raised vs the first sweep (lift 22 -> 0, elbow 45 -> 35): keeps the fingers
 # >= 5 cm above the plate at every pose incl. gripper extremes (AABB-checked).
 BASE_POSE = {"shoulder_pan": 0.0, "shoulder_lift": 0.0, "elbow_flex": 35.0,
@@ -149,7 +151,7 @@ def load_handeye():
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--port", default="/dev/ttyACM1")
+    ap.add_argument("--port", default=ARM_PORT)
     ap.add_argument("--solve", metavar="JSON",
                     help="skip the sweep: load saved samples and re-run the solver")
     ap.add_argument("--selftest", action="store_true",

@@ -50,20 +50,21 @@ import rerun.blueprint as rrb
 from lerobot.robots.so_follower import SOFollower
 from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
 
+from config import ARM_PORT, RS_SERIAL, LOGS, SCENE_XML
 from gamepad_utils import (
     MOTOR_NAMES, JOINT_LIMITS, REST_POSE,
     detect_profile, get_joint_deltas, apply_deltas, is_neutral, button_index,
     graceful_shutdown, DeltaSmoother, ButtonDebouncer,
 )
 
-PORT     = "/dev/ttyACM1"  # CH343 arm controller (ESP32-C3 IMU takes ttyACM0)
+PORT     = ARM_PORT
 CMD_RATE_HZ = 50           # teleop command tick; telemetry still polls at --rate
 IDLE_LIMP_S = 1.0          # after this long with no teleop input, release shoulder_pan
                            # torque so it stops hunting around its setpoint (gravity-neutral
                            # joint — safe to limp; re-armed on the next input)
 ROBOT_ID = "so101"
-LOG_DIR  = Path("/home/javad/workspace/lerobot_all/outputs/logs")
-SCENE_XML = "/home/javad/workspace/lerobot_all/SO-ARM100/Simulation/SO101/scene.xml"
+LOG_DIR  = LOGS
+
 
 # ── Motor register decoders ────────────────────────────────────────────────────
 
@@ -358,7 +359,7 @@ def make_robot_config(args):
         # also let lerobot grab it here or the device is busy.
         if not args.no_realsense and not args.vision:
             cameras["realsense"] = RealSenseCameraConfig(
-                serial_number_or_name="117222251972", fps=15, width=640, height=480)
+                serial_number_or_name=RS_SERIAL, fps=15, width=640, height=480)
         if not args.no_wrist:
             cameras["wrist"] = OpenCVCameraConfig(
                 index_or_path=15, fps=25, width=640, height=480)

@@ -43,7 +43,7 @@ MOTOR_NAMES = [
     "shoulder_pan", "shoulder_lift", "elbow_flex",
     "wrist_flex", "wrist_roll", "gripper",
 ]
-SCENE_XML = "/home/javad/workspace/lerobot_all/SO-ARM100/Simulation/SO101/scene.xml"
+from config import SCENE_XML
 
 # Register -> physical-gain scaling (see module docstring).
 KP_SCALE = 0.84     # P=32  -> kp ≈ 27  (wn ≈ 25 rad/s ≈ 4 Hz for the ~0.043 kg·m² joints)

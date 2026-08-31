@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+from config import ARM_PORT
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -610,7 +611,7 @@ def main():
     ap.add_argument("--no-twin", action="store_true", help="Skip the MuJoCo twin window.")
     ap.add_argument("--record", action="store_true",
                     help="Save a camera frame at each grasp stage (forensics).")
-    ap.add_argument("--port", default="/dev/ttyACM1")
+    ap.add_argument("--port", default=ARM_PORT)
     args = ap.parse_args()
 
     if args.selftest:
